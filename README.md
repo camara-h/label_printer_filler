@@ -1,35 +1,29 @@
-# LabTAG LCS-125WH label filler
+# LabTAG LCS-125WH Label Filler
 
-This Streamlit app fills the LabTAG LCS-125WH Word template while preserving the original table geometry, margins, rows, columns, and cell sizes from the uploaded `.docx` template.
+Streamlit app for filling the LabTAG LCS-125WH Word template while preserving the original `.docx` table geometry.
 
-## Run locally
+## Install
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Use
+## Main workflow
 
-1. Open the app.
-2. Use the included `Letter-125-NO0424.docx` template or upload another copy of the official template.
-3. Choose start row and label column.
-4. Enter the number of labels to create.
-5. Configure circle and rectangle lines.
-6. Check `serialize trailing number` only for lines that should increment, for example `Tissue 1`.
-7. Generate and download the filled `.docx`.
-
-The app fills labels top to bottom, then left to right.
-
-Logical label columns map to the Word table like this:
-
-Label 1 uses table columns 1 and 2. Column 3 is spacer.
-Label 2 uses table columns 4 and 5. Column 6 is spacer.
-Label 3 uses table columns 7 and 8. Column 9 is spacer.
-Label 4 uses table columns 10 and 11. Column 12 is spacer.
-Label 5 uses table columns 13 and 14.
+1. Use the included LCS-125WH template or upload a `.docx` template.
+2. Add one or more Label ID Sets, for example Liver and Brain.
+3. For each set, choose start sheet, start row, start label column, and number of labels.
+4. Build the editable layout.
+5. Review the editable layout and sheet map.
+6. Manually adjust sheet, row, or label column if needed.
+7. Generate and download the final `.docx`.
 
 ## Notes
 
-Always test print on regular paper first and hold it behind the label sheet against a light source before printing on real labels.
-# label_printer_filler
+- The app fills labels top to bottom, then left to right.
+- Existing text in the uploaded template is detected and can be skipped automatically.
+- If more labels are needed than fit on the current page, the app adds additional blank template pages.
+- The editable layout tab is for placement edits.
+- The advanced text editing tab allows final line-level text edits using JSON lists while preserving the original formatting rules for each line.
+- Always test print on plain paper first using actual size or 100 percent scaling.
