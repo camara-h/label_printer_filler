@@ -15,7 +15,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
 
 APP_DIR = Path(__file__).parent
 DEFAULT_TEMPLATE = APP_DIR / "Letter-125-NO0424.docx"
@@ -100,12 +100,23 @@ def add_tab_stop_right(paragraph, position_twips: int = 1200):
     tabs.append(tab)
 
 
-def add_formatted_run(paragraph, text: str, font_size: float, bold: bool):
+def normalize_hex_color(value: Any, default: str = "#000000") -> str:
+    text = str(value or default).strip()
+    if not text.startswith("#"):
+        text = "#" + text
+    if re.fullmatch(r"#[0-9A-Fa-f]{6}", text):
+        return text.upper()
+    return default
+
+
+def add_formatted_run(paragraph, text: str, font_size: float, bold: bool, color: str = "#000000"):
     run = paragraph.add_run(text or "")
     run.font.name = "Calibri"
     run._element.rPr.rFonts.set(qn("w:eastAsia"), "Calibri")
     run.font.size = Pt(float(font_size))
     run.bold = bool(bold)
+    color = normalize_hex_color(color)
+    run.font.color.rgb = RGBColor.from_string(color.replace("#", ""))
     return run
 
 
@@ -133,11 +144,11 @@ def write_cell_from_lines(cell, lines: List[Dict[str, Any]], label_offset: int =
         else:
             right_text = override_right_texts[idx] if idx < len(override_right_texts) else ""
 
-        add_formatted_run(paragraph, left_text, line.get("font_size", 6.0), line.get("bold", False))
+        add_formatted_run(paragraph, left_text, line.get("font_size", 6.0), line.get("bold", False), line.get("color", "#000000"))
         if line.get("use_tab") and right_text:
             add_tab_stop_right(paragraph, int(line.get("tab_pos", 1200)))
             paragraph.add_run("\t")
-            add_formatted_run(paragraph, right_text, line.get("font_size", 6.0), line.get("bold", False))
+            add_formatted_run(paragraph, right_text, line.get("font_size", 6.0), line.get("bold", False), line.get("color", "#000000"))
 
 
 def cell_has_content(cell) -> bool:
@@ -211,13 +222,13 @@ def ensure_sheet_count(doc: Document, desired_sheets: int):
 def default_lines(kind: str) -> List[Dict[str, Any]]:
     if kind == "circle":
         return [
-            {"left_text": "Tissue 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Center", "serialize_left": True, "serialize_right": False, "tab_pos": 700},
-            {"left_text": "EXP_ID", "right_text": "", "use_tab": False, "font_size": 5.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 700},
+            {"left_text": "Tissue 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Center", "serialize_left": True, "serialize_right": False, "tab_pos": 700, "color": "#000000"},
+            {"left_text": "EXP_ID", "right_text": "", "use_tab": False, "font_size": 5.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 700, "color": "#000000"},
         ]
     return [
-        {"left_text": "Tissue 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Center", "serialize_left": True, "serialize_right": False, "tab_pos": 1200},
-        {"left_text": "Tissue Biopsy", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 1200},
-        {"left_text": "EXP_ID", "right_text": "Exp_data", "use_tab": True, "font_size": 6.0, "bold": False, "align": "Right", "serialize_left": False, "serialize_right": False, "tab_pos": 1200},
+        {"left_text": "Tissue 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Center", "serialize_left": True, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+        {"left_text": "Tissue Biopsy", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+        {"left_text": "EXP_ID", "right_text": "Exp_data", "use_tab": True, "font_size": 6.0, "bold": False, "align": "Right", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
     ]
 
 
@@ -258,6 +269,7 @@ def normalize_lines(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "serialize_left": bool(line.get("serialize_left", False)),
             "serialize_right": bool(line.get("serialize_right", False)),
             "tab_pos": int(line.get("tab_pos", 1200)),
+            "color": normalize_hex_color(line.get("color", "#000000")),
         })
     return clean
 
@@ -268,7 +280,7 @@ def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]]) -> List[Di
     c_add, c_remove = st.columns(2)
     with c_add:
         if st.button(f"Add line to {label.lower()}", key=f"add_{prefix}"):
-            lines.append({"left_text": "", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 1000})
+            lines.append({"left_text": "", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 1000, "color": "#000000"})
             return lines
     with c_remove:
         if lines and st.button(f"Remove last {label.lower()} line", key=f"remove_{prefix}"):
@@ -288,13 +300,15 @@ def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]]) -> List[Di
                 line["right_text"] = line.get("right_text", "")
                 line["serialize_right"] = line.get("serialize_right", False)
 
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns(4)
             with c1:
                 line["font_size"] = st.number_input("Font size", min_value=3.0, max_value=14.0, value=float(line.get("font_size", 6.0)), step=0.5, key=f"{prefix}_size_{idx}")
             with c2:
                 line["bold"] = st.checkbox("Bold", value=bool(line.get("bold", False)), key=f"{prefix}_bold_{idx}")
             with c3:
                 line["align"] = st.selectbox("Alignment", options=DISPLAY_ALIGNMENTS, index=DISPLAY_ALIGNMENTS.index(line.get("align", "Center")), key=f"{prefix}_align_{idx}")
+            with c4:
+                line["color"] = st.color_picker("Text color", value=normalize_hex_color(line.get("color", "#000000")), key=f"{prefix}_color_{idx}")
     return lines
 
 
