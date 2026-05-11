@@ -15,7 +15,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
 
 APP_DIR = Path(__file__).parent
 DEFAULT_TEMPLATE = APP_DIR / "Letter-125-NO0424.docx"
@@ -30,6 +30,13 @@ ALIGNMENTS = {
 }
 
 DISPLAY_ALIGNMENTS = list(ALIGNMENTS.keys())
+
+MIN_FONT_SIZE = 4.0
+MAX_FONT_SIZE = 7.0
+MIN_RECOMMENDED_FONT_SIZE = 5.0
+MAX_CIRCLE_LINES = 3
+MAX_RECTANGLE_LINES = 6
+RECOMMENDED_RECTANGLE_LINES = 5
 
 
 def label_to_table_columns(label_column: int) -> Tuple[int, int]:
@@ -100,12 +107,23 @@ def add_tab_stop_right(paragraph, position_twips: int = 1200):
     tabs.append(tab)
 
 
-def add_formatted_run(paragraph, text: str, font_size: float, bold: bool):
+def normalize_hex_color(value: Any, default: str = "#000000") -> str:
+    text = str(value or default).strip()
+    if not text.startswith("#"):
+        text = "#" + text
+    if re.fullmatch(r"#[0-9A-Fa-f]{6}", text):
+        return text.upper()
+    return default
+
+
+def add_formatted_run(paragraph, text: str, font_size: float, bold: bool, color: str = "#000000"):
     run = paragraph.add_run(text or "")
     run.font.name = "Calibri"
     run._element.rPr.rFonts.set(qn("w:eastAsia"), "Calibri")
     run.font.size = Pt(float(font_size))
     run.bold = bool(bold)
+    color = normalize_hex_color(color)
+    run.font.color.rgb = RGBColor.from_string(color.replace("#", ""))
     return run
 
 
@@ -133,11 +151,11 @@ def write_cell_from_lines(cell, lines: List[Dict[str, Any]], label_offset: int =
         else:
             right_text = override_right_texts[idx] if idx < len(override_right_texts) else ""
 
-        add_formatted_run(paragraph, left_text, line.get("font_size", 6.0), line.get("bold", False))
+        add_formatted_run(paragraph, left_text, line.get("font_size", 6.0), line.get("bold", False), line.get("color", "#000000"))
         if line.get("use_tab") and right_text:
             add_tab_stop_right(paragraph, int(line.get("tab_pos", 1200)))
             paragraph.add_run("\t")
-            add_formatted_run(paragraph, right_text, line.get("font_size", 6.0), line.get("bold", False))
+            add_formatted_run(paragraph, right_text, line.get("font_size", 6.0), line.get("bold", False), line.get("color", "#000000"))
 
 
 def cell_has_content(cell) -> bool:
@@ -211,13 +229,13 @@ def ensure_sheet_count(doc: Document, desired_sheets: int):
 def default_lines(kind: str) -> List[Dict[str, Any]]:
     if kind == "circle":
         return [
-            {"left_text": "Tissue 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Center", "serialize_left": True, "serialize_right": False, "tab_pos": 700},
-            {"left_text": "EXP_ID", "right_text": "", "use_tab": False, "font_size": 5.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 700},
+            {"left_text": "Tissue 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Center", "serialize_left": True, "serialize_right": False, "tab_pos": 700, "color": "#000000"},
+            {"left_text": "EXP_ID", "right_text": "", "use_tab": False, "font_size": 5.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 700, "color": "#000000"},
         ]
     return [
-        {"left_text": "Tissue 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Center", "serialize_left": True, "serialize_right": False, "tab_pos": 1200},
-        {"left_text": "Tissue Biopsy", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 1200},
-        {"left_text": "EXP_ID", "right_text": "Exp_data", "use_tab": True, "font_size": 6.0, "bold": False, "align": "Right", "serialize_left": False, "serialize_right": False, "tab_pos": 1200},
+        {"left_text": "Tissue 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Center", "serialize_left": True, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+        {"left_text": "Tissue Biopsy", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+        {"left_text": "EXP_ID", "right_text": "Exp_data", "use_tab": True, "font_size": 6.0, "bold": False, "align": "Right", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
     ]
 
 
@@ -258,22 +276,56 @@ def normalize_lines(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "serialize_left": bool(line.get("serialize_left", False)),
             "serialize_right": bool(line.get("serialize_right", False)),
             "tab_pos": int(line.get("tab_pos", 1200)),
+            "color": normalize_hex_color(line.get("color", "#000000")),
         })
     return clean
 
 
-def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    lines = normalize_lines(lines)
+def sync_line_widget_state(prefix: str, lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Copy existing widget values back into the line data before add/remove actions.
+
+    Streamlit reruns the full script when a button is clicked. If the button is
+    placed before the line widgets, the app can otherwise rebuild from the old
+    saved line data and temporarily hide the editor. This keeps the source list
+    and visible widgets in sync on every rerun.
+    """
+    for idx, line in enumerate(lines):
+        line["left_text"] = st.session_state.get(f"{prefix}_left_{idx}", line.get("left_text", ""))
+        line["serialize_left"] = st.session_state.get(f"{prefix}_ser_left_{idx}", line.get("serialize_left", False))
+        line["use_tab"] = st.session_state.get(f"{prefix}_tab_{idx}", line.get("use_tab", False))
+        line["right_text"] = st.session_state.get(f"{prefix}_right_{idx}", line.get("right_text", ""))
+        line["serialize_right"] = st.session_state.get(f"{prefix}_ser_right_{idx}", line.get("serialize_right", False))
+        line["tab_pos"] = st.session_state.get(f"{prefix}_tabpos_{idx}", line.get("tab_pos", 1200))
+        line["font_size"] = st.session_state.get(f"{prefix}_size_{idx}", line.get("font_size", 6.0))
+        line["bold"] = st.session_state.get(f"{prefix}_bold_{idx}", line.get("bold", False))
+        line["align"] = st.session_state.get(f"{prefix}_align_{idx}", line.get("align", "Center"))
+        line["color"] = st.session_state.get(f"{prefix}_color_{idx}", line.get("color", "#000000"))
+    return normalize_lines(lines)
+
+
+def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]], max_lines: Optional[int] = None, recommended_lines: Optional[int] = None) -> List[Dict[str, Any]]:
+    lines = sync_line_widget_state(prefix, normalize_lines(lines))
+
+    if max_lines is not None and len(lines) > max_lines:
+        st.error(f"{label} labels can have a maximum of {max_lines} lines. Extra lines were removed because they are unlikely to print correctly.")
+        lines = lines[:max_lines]
+
+    if recommended_lines is not None and len(lines) > recommended_lines:
+        st.warning(f"{label} labels usually print best with {recommended_lines} lines or fewer. You can use up to {max_lines} lines if needed.")
 
     c_add, c_remove = st.columns(2)
     with c_add:
-        if st.button(f"Add line to {label.lower()}", key=f"add_{prefix}"):
-            lines.append({"left_text": "", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 1000})
-            return lines
+        add_disabled = max_lines is not None and len(lines) >= max_lines
+        if st.button(f"Add line to {label.lower()}", key=f"add_{prefix}", disabled=add_disabled):
+            lines.append({"left_text": "", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 1000, "color": "#000000"})
+            # Do not return early. Continue rendering so the new blank editor
+            # appears immediately on the same rerun.
+        if add_disabled:
+            st.caption(f"Maximum reached: {label.lower()} labels are limited to {max_lines} lines.")
     with c_remove:
         if lines and st.button(f"Remove last {label.lower()} line", key=f"remove_{prefix}"):
             lines.pop()
-            return lines
+            # Do not return early. Continue rendering the remaining editors.
 
     for idx, line in enumerate(lines):
         with st.expander(f"{label} line {idx + 1}", expanded=True):
@@ -288,15 +340,28 @@ def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]]) -> List[Di
                 line["right_text"] = line.get("right_text", "")
                 line["serialize_right"] = line.get("serialize_right", False)
 
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns(4)
             with c1:
-                line["font_size"] = st.number_input("Font size", min_value=3.0, max_value=14.0, value=float(line.get("font_size", 6.0)), step=0.5, key=f"{prefix}_size_{idx}")
+                current_size = float(line.get("font_size", 6.0))
+                current_size = min(MAX_FONT_SIZE, max(MIN_FONT_SIZE, current_size))
+                line["font_size"] = st.number_input(
+                    "Font size",
+                    min_value=MIN_FONT_SIZE,
+                    max_value=MAX_FONT_SIZE,
+                    value=current_size,
+                    step=0.5,
+                    help="Recommended: 5 to 7 pt. 4 pt is allowed, but may be hard to read.",
+                    key=f"{prefix}_size_{idx}",
+                )
+                if float(line["font_size"]) < MIN_RECOMMENDED_FONT_SIZE:
+                    st.warning("4 pt may be difficult to read after printing.")
             with c2:
                 line["bold"] = st.checkbox("Bold", value=bool(line.get("bold", False)), key=f"{prefix}_bold_{idx}")
             with c3:
                 line["align"] = st.selectbox("Alignment", options=DISPLAY_ALIGNMENTS, index=DISPLAY_ALIGNMENTS.index(line.get("align", "Center")), key=f"{prefix}_align_{idx}")
+            with c4:
+                line["color"] = st.color_picker("Text color", value=normalize_hex_color(line.get("color", "#000000")), key=f"{prefix}_color_{idx}")
     return lines
-
 
 def line_texts_for_label(lines: List[Dict[str, Any]], offset: int) -> Tuple[List[str], List[str], str]:
     lefts = []
@@ -553,9 +618,9 @@ def main():
 
             ltab, rtab = st.tabs(["Circle formatting", "Rectangle formatting"])
             with ltab:
-                label_set["circle_lines"] = line_editor(f"set{set_idx}_circle", "Circle", label_set.get("circle_lines", default_lines("circle")))
+                label_set["circle_lines"] = line_editor(f"set{set_idx}_circle", "Circle", label_set.get("circle_lines", default_lines("circle")), max_lines=MAX_CIRCLE_LINES)
             with rtab:
-                label_set["rectangle_lines"] = line_editor(f"set{set_idx}_rectangle", "Rectangle", label_set.get("rectangle_lines", default_lines("rectangle")))
+                label_set["rectangle_lines"] = line_editor(f"set{set_idx}_rectangle", "Rectangle", label_set.get("rectangle_lines", default_lines("rectangle")), max_lines=MAX_RECTANGLE_LINES, recommended_lines=RECOMMENDED_RECTANGLE_LINES)
 
     st.divider()
     st.subheader("2. Build editable layout and preview")
