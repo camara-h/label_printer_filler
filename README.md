@@ -29,3 +29,13 @@ streamlit run app.py
 - The editable layout tab is for placement edits.
 - The advanced text editing tab allows final line-level text edits using JSON lists while preserving the original formatting rules for each line.
 - Always test print on plain paper first using actual size or 100 percent scaling.
+
+
+## v4 printing safeguards
+
+This version adds practical limits based on the physical label size:
+
+- Circle labels are limited to 3 lines. This is a hard limit because additional lines usually do not print reliably.
+- Rectangle labels are limited to 6 lines, with an in-app warning after 5 lines.
+- Font sizes are limited to 4 to 7 pt. The app warns when 4 pt is used because it may be hard to read after printing.
+- Text color is still controlled per line using the HEX color picker.
