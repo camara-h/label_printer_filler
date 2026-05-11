@@ -303,29 +303,100 @@ def sync_line_widget_state(prefix: str, lines: List[Dict[str, Any]]) -> List[Dic
     return normalize_lines(lines)
 
 
+def line_defaults() -> Dict[str, Any]:
+    return {
+        "left_text": "",
+        "right_text": "",
+        "use_tab": False,
+        "font_size": 6.0,
+        "bold": False,
+        "align": "Center",
+        "serialize_left": False,
+        "serialize_right": False,
+        "tab_pos": 1000,
+        "color": "#000000",
+    }
+
+
+def line_count_guidance(label: str, max_lines: Optional[int], recommended_lines: Optional[int]) -> None:
+    if label.lower() == "circle":
+        st.caption(
+            "Circle layout: up to 3 lines. Suggested 3-line format: font 5 plain for experiment info, "
+            "font 6 or 7 bold for the main label, and font 5 plain or bold for secondary information."
+        )
+    else:
+        st.caption(
+            "Rectangle layout: up to 6 lines. Labels usually print best with 5 lines or fewer. "
+            "Suggested format: line 1 font 7 bold for main info, lines 2 to 3 font 6 plain for complementary info, "
+            "and line 4 font 5 plain for Exp ID, date, or other reproducibility metadata."
+        )
+
+    st.caption(
+        "Font guidance: 7 bold is ideal for main information. 6 plain is good for concentrations, storage method, "
+        "solvent, or expiration date. 5 is good for Exp ID or date. 4 should only be used if space is very limited."
+    )
+
+
+def font_help_text(label: str) -> str:
+    if label.lower() == "circle":
+        fit_text = "Approximate circle fit: 7 pt works best for 6 to 8 characters, 6 pt for 8 to 10, 5 pt for 10 to 12, and 4 pt only for very short metadata."
+    else:
+        fit_text = "Approximate rectangle fit per line: 7 pt works best for 12 to 16 characters, 6 pt for 16 to 22, 5 pt for 22 to 28, and 4 pt only when space is very limited."
+    return (
+        "Allowed range: 4 to 7 pt. Recommended: 5 to 7 pt. "
+        "7 bold is ideal for main information. 6 plain is good for important additional information. "
+        "5 is good for reproducibility metadata. 4 should only be used if space is very limited. "
+        + fit_text
+    )
+
+
 def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]], max_lines: Optional[int] = None, recommended_lines: Optional[int] = None) -> List[Dict[str, Any]]:
-    lines = sync_line_widget_state(prefix, normalize_lines(lines))
+    state_key = f"{prefix}_lines_state"
+
+    if state_key not in st.session_state:
+        st.session_state[state_key] = normalize_lines(lines)
+
+    # Keep the canonical line list in sync with any visible widget edits before
+    # handling add/remove buttons. This avoids stale values after Streamlit reruns.
+    lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+    st.session_state[state_key] = lines
+
+    line_count_guidance(label, max_lines, recommended_lines)
+
+    if max_lines is not None and len(lines) >= max_lines:
+        if label.lower() == "circle":
+            st.warning(f"Circle labels are limited to {max_lines} lines because additional lines usually do not print correctly.")
+        else:
+            st.warning(f"Maximum reached: rectangle labels are limited to {max_lines} lines.")
+    elif recommended_lines is not None and len(lines) >= recommended_lines:
+        st.warning(f"Rectangle labels usually print best with {recommended_lines} lines or fewer. You can use up to {max_lines} lines if needed.")
 
     if max_lines is not None and len(lines) > max_lines:
-        st.error(f"{label} labels can have a maximum of {max_lines} lines. Extra lines were removed because they are unlikely to print correctly.")
-        lines = lines[:max_lines]
-
-    if recommended_lines is not None and len(lines) > recommended_lines:
-        st.warning(f"{label} labels usually print best with {recommended_lines} lines or fewer. You can use up to {max_lines} lines if needed.")
+        st.warning(
+            f"{label} has {len(lines)} lines, which is above the recommended app limit of {max_lines}. "
+            "Remove extra lines one at a time. The app will not delete them automatically."
+        )
 
     c_add, c_remove = st.columns(2)
     with c_add:
         add_disabled = max_lines is not None and len(lines) >= max_lines
-        if st.button(f"Add line to {label.lower()}", key=f"add_{prefix}", disabled=add_disabled):
-            lines.append({"left_text": "", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 1000, "color": "#000000"})
-            # Do not return early. Continue rendering so the new blank editor
-            # appears immediately on the same rerun.
+        add_clicked = st.button(f"Add line to {label.lower()}", key=f"add_{prefix}", disabled=add_disabled)
         if add_disabled:
             st.caption(f"Maximum reached: {label.lower()} labels are limited to {max_lines} lines.")
+        if add_clicked:
+            lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+            if max_lines is None or len(lines) < max_lines:
+                lines.append(line_defaults())
+                st.session_state[state_key] = normalize_lines(lines)
+            st.rerun()
     with c_remove:
-        if lines and st.button(f"Remove last {label.lower()} line", key=f"remove_{prefix}"):
-            lines.pop()
-            # Do not return early. Continue rendering the remaining editors.
+        remove_clicked = st.button(f"Remove last {label.lower()} line", key=f"remove_{prefix}", disabled=len(lines) == 0)
+        if remove_clicked:
+            lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+            if lines:
+                lines.pop()
+                st.session_state[state_key] = normalize_lines(lines)
+            st.rerun()
 
     for idx, line in enumerate(lines):
         with st.expander(f"{label} line {idx + 1}", expanded=True):
@@ -350,17 +421,18 @@ def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]], max_lines:
                     max_value=MAX_FONT_SIZE,
                     value=current_size,
                     step=0.5,
-                    help="Recommended: 5 to 7 pt. 4 pt is allowed, but may be hard to read.",
+                    help=font_help_text(label),
                     key=f"{prefix}_size_{idx}",
                 )
-                if float(line["font_size"]) < MIN_RECOMMENDED_FONT_SIZE:
-                    st.warning("4 pt may be difficult to read after printing.")
             with c2:
                 line["bold"] = st.checkbox("Bold", value=bool(line.get("bold", False)), key=f"{prefix}_bold_{idx}")
             with c3:
                 line["align"] = st.selectbox("Alignment", options=DISPLAY_ALIGNMENTS, index=DISPLAY_ALIGNMENTS.index(line.get("align", "Center")), key=f"{prefix}_align_{idx}")
             with c4:
                 line["color"] = st.color_picker("Text color", value=normalize_hex_color(line.get("color", "#000000")), key=f"{prefix}_color_{idx}")
+
+    lines = normalize_lines(lines)
+    st.session_state[state_key] = lines
     return lines
 
 def line_texts_for_label(lines: List[Dict[str, Any]], offset: int) -> Tuple[List[str], List[str], str]:
