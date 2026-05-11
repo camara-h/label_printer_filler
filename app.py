@@ -91,7 +91,7 @@ def set_line_spacing(paragraph):
         p_pr.append(spacing)
     spacing.set(qn("w:before"), "0")
     spacing.set(qn("w:after"), "0")
-    spacing.set(qn("w:line"), "240")
+    spacing.set(qn("w:line"), "192")
     spacing.set(qn("w:lineRule"), "auto")
 
 
