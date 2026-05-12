@@ -1,6 +1,7 @@
 # LabTAG LCS-125WH Label Filler
 
 Streamlit app for filling the LabTAG LCS-125WH Word template while preserving the original `.docx` table geometry.
+App can be accessed at https://labelprinterfiller.streamlit.app/ (it may need dot be awaken)
 
 ## Install
 
