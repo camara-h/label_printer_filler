@@ -91,7 +91,7 @@ def set_line_spacing(paragraph):
         p_pr.append(spacing)
     spacing.set(qn("w:before"), "0")
     spacing.set(qn("w:after"), "0")
-    spacing.set(qn("w:line"), "120")
+    spacing.set(qn("w:line"), "240")
     spacing.set(qn("w:lineRule"), "auto")
 
 
@@ -261,6 +261,10 @@ def init_state():
         st.session_state.label_sets = [new_label_set("Tissue", 1, 1, 20)]
     if "layout_df" not in st.session_state:
         st.session_state.layout_df = pd.DataFrame()
+    if "generated_docx" not in st.session_state:
+        st.session_state.generated_docx = None
+    if "generated_inventory_xlsx" not in st.session_state:
+        st.session_state.generated_inventory_xlsx = None
 
 
 def normalize_lines(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -303,29 +307,100 @@ def sync_line_widget_state(prefix: str, lines: List[Dict[str, Any]]) -> List[Dic
     return normalize_lines(lines)
 
 
+def line_defaults() -> Dict[str, Any]:
+    return {
+        "left_text": "",
+        "right_text": "",
+        "use_tab": False,
+        "font_size": 6.0,
+        "bold": False,
+        "align": "Center",
+        "serialize_left": False,
+        "serialize_right": False,
+        "tab_pos": 1000,
+        "color": "#000000",
+    }
+
+
+def line_count_guidance(label: str, max_lines: Optional[int], recommended_lines: Optional[int]) -> None:
+    if label.lower() == "circle":
+        st.caption(
+            "Circle layout: up to 3 lines. Suggested 3-line format: font 5 plain for experiment info, "
+            "font 6 or 7 bold for the main label, and font 5 plain or bold for secondary information."
+        )
+    else:
+        st.caption(
+            "Rectangle layout: up to 6 lines. Labels usually print best with 5 lines or fewer. "
+            "Suggested format: line 1 font 7 bold for main info, lines 2 to 3 font 6 plain for complementary info, "
+            "and line 4 font 5 plain for Exp ID, date, or other reproducibility metadata."
+        )
+
+    st.caption(
+        "Font guidance: 7 bold is ideal for main information. 6 plain is good for concentrations, storage method, "
+        "solvent, or expiration date. 5 is good for Exp ID or date. 4 should only be used if space is very limited."
+    )
+
+
+def font_help_text(label: str) -> str:
+    if label.lower() == "circle":
+        fit_text = "Approximate circle fit: 7 pt works best for 6 to 8 characters, 6 pt for 8 to 10, 5 pt for 10 to 12, and 4 pt only for very short metadata."
+    else:
+        fit_text = "Approximate rectangle fit per line: 7 pt works best for 12 to 16 characters, 6 pt for 16 to 22, 5 pt for 22 to 28, and 4 pt only when space is very limited."
+    return (
+        "Allowed range: 4 to 7 pt. Recommended: 5 to 7 pt. "
+        "7 bold is ideal for main information. 6 plain is good for important additional information. "
+        "5 is good for reproducibility metadata. 4 should only be used if space is very limited. "
+        + fit_text
+    )
+
+
 def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]], max_lines: Optional[int] = None, recommended_lines: Optional[int] = None) -> List[Dict[str, Any]]:
-    lines = sync_line_widget_state(prefix, normalize_lines(lines))
+    state_key = f"{prefix}_lines_state"
+
+    if state_key not in st.session_state:
+        st.session_state[state_key] = normalize_lines(lines)
+
+    # Keep the canonical line list in sync with any visible widget edits before
+    # handling add/remove buttons. This avoids stale values after Streamlit reruns.
+    lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+    st.session_state[state_key] = lines
+
+    line_count_guidance(label, max_lines, recommended_lines)
+
+    if max_lines is not None and len(lines) >= max_lines:
+        if label.lower() == "circle":
+            st.warning(f"Circle labels are limited to {max_lines} lines because additional lines usually do not print correctly.")
+        else:
+            st.warning(f"Maximum reached: rectangle labels are limited to {max_lines} lines.")
+    elif recommended_lines is not None and len(lines) >= recommended_lines:
+        st.warning(f"Rectangle labels usually print best with {recommended_lines} lines or fewer. You can use up to {max_lines} lines if needed.")
 
     if max_lines is not None and len(lines) > max_lines:
-        st.error(f"{label} labels can have a maximum of {max_lines} lines. Extra lines were removed because they are unlikely to print correctly.")
-        lines = lines[:max_lines]
-
-    if recommended_lines is not None and len(lines) > recommended_lines:
-        st.warning(f"{label} labels usually print best with {recommended_lines} lines or fewer. You can use up to {max_lines} lines if needed.")
+        st.warning(
+            f"{label} has {len(lines)} lines, which is above the recommended app limit of {max_lines}. "
+            "Remove extra lines one at a time. The app will not delete them automatically."
+        )
 
     c_add, c_remove = st.columns(2)
     with c_add:
         add_disabled = max_lines is not None and len(lines) >= max_lines
-        if st.button(f"Add line to {label.lower()}", key=f"add_{prefix}", disabled=add_disabled):
-            lines.append({"left_text": "", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 1000, "color": "#000000"})
-            # Do not return early. Continue rendering so the new blank editor
-            # appears immediately on the same rerun.
+        add_clicked = st.button(f"Add line to {label.lower()}", key=f"add_{prefix}", disabled=add_disabled)
         if add_disabled:
             st.caption(f"Maximum reached: {label.lower()} labels are limited to {max_lines} lines.")
+        if add_clicked:
+            lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+            if max_lines is None or len(lines) < max_lines:
+                lines.append(line_defaults())
+                st.session_state[state_key] = normalize_lines(lines)
+            st.rerun()
     with c_remove:
-        if lines and st.button(f"Remove last {label.lower()} line", key=f"remove_{prefix}"):
-            lines.pop()
-            # Do not return early. Continue rendering the remaining editors.
+        remove_clicked = st.button(f"Remove last {label.lower()} line", key=f"remove_{prefix}", disabled=len(lines) == 0)
+        if remove_clicked:
+            lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+            if lines:
+                lines.pop()
+                st.session_state[state_key] = normalize_lines(lines)
+            st.rerun()
 
     for idx, line in enumerate(lines):
         with st.expander(f"{label} line {idx + 1}", expanded=True):
@@ -350,17 +425,18 @@ def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]], max_lines:
                     max_value=MAX_FONT_SIZE,
                     value=current_size,
                     step=0.5,
-                    help="Recommended: 5 to 7 pt. 4 pt is allowed, but may be hard to read.",
+                    help=font_help_text(label),
                     key=f"{prefix}_size_{idx}",
                 )
-                if float(line["font_size"]) < MIN_RECOMMENDED_FONT_SIZE:
-                    st.warning("4 pt may be difficult to read after printing.")
             with c2:
                 line["bold"] = st.checkbox("Bold", value=bool(line.get("bold", False)), key=f"{prefix}_bold_{idx}")
             with c3:
                 line["align"] = st.selectbox("Alignment", options=DISPLAY_ALIGNMENTS, index=DISPLAY_ALIGNMENTS.index(line.get("align", "Center")), key=f"{prefix}_align_{idx}")
             with c4:
                 line["color"] = st.color_picker("Text color", value=normalize_hex_color(line.get("color", "#000000")), key=f"{prefix}_color_{idx}")
+
+    lines = normalize_lines(lines)
+    st.session_state[state_key] = lines
     return lines
 
 def line_texts_for_label(lines: List[Dict[str, Any]], offset: int) -> Tuple[List[str], List[str], str]:
@@ -463,6 +539,76 @@ def parse_json_list(value: Any) -> List[str]:
     except Exception:
         pass
     return []
+
+
+def flatten_label_text(left_values: List[str], right_values: Optional[List[str]] = None) -> str:
+    """Combine line-level label text into one inventory-table cell.
+
+    Word labels can contain separate lines and tabbed right-side text. For the
+    inventory export, these are flattened into a semicolon-separated string so
+    the result is easy to sort, filter, and paste into freezer inventory sheets.
+    """
+    right_values = right_values or []
+    pieces = []
+    max_len = max(len(left_values), len(right_values))
+    for idx in range(max_len):
+        left = str(left_values[idx]) if idx < len(left_values) else ""
+        right = str(right_values[idx]) if idx < len(right_values) else ""
+        combined = "\t".join([part for part in [left, right] if part.strip()])
+        combined = re.sub(r"[\r\n\t]+", "; ", combined)
+        combined = re.sub(r"\s*;\s*", "; ", combined).strip(" ;")
+        if combined:
+            pieces.append(combined)
+    return "; ".join(pieces)
+
+
+def box_position(index_zero_based: int) -> Tuple[int, str, str]:
+    """Return 10 x 10 box coordinates using 1A, 2A ... 10A, 1B ... 10J."""
+    box_col = (index_zero_based % 10) + 1
+    box_row = chr(ord("A") + ((index_zero_based // 10) % 10))
+    grid_id = f"{box_col}{box_row}"
+    return box_col, box_row, grid_id
+
+
+def build_inventory_table(layout_df: pd.DataFrame, include_box_layout: bool = True) -> pd.DataFrame:
+    if layout_df.empty:
+        return pd.DataFrame(columns=["sample_id", "description"])
+
+    active_df = layout_df[layout_df.get("Use", True)].copy()
+    active_df = active_df.sort_values(["Sheet", "Row", "Label column", "Global #"], kind="stable")
+
+    rows = []
+    for inventory_idx, (_, layout_row) in enumerate(active_df.iterrows()):
+        circle_lefts = parse_json_list(layout_row.get("Circle left JSON", "[]"))
+        circle_rights = parse_json_list(layout_row.get("Circle right JSON", "[]"))
+        rect_lefts = parse_json_list(layout_row.get("Rectangle left JSON", "[]"))
+        rect_rights = parse_json_list(layout_row.get("Rectangle right JSON", "[]"))
+
+        entry = {
+            "sample_id": flatten_label_text(circle_lefts, circle_rights),
+            "description": flatten_label_text(rect_lefts, rect_rights),
+        }
+        if include_box_layout:
+            box_col, box_row, grid_id = box_position(inventory_idx)
+            entry.update({"box_column": box_col, "box_row": box_row, "grid_id": grid_id})
+        rows.append(entry)
+    return pd.DataFrame(rows)
+
+
+def inventory_table_to_excel_bytes(inventory_df: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        inventory_df.to_excel(writer, index=False, sheet_name="Inventory")
+        worksheet = writer.sheets["Inventory"]
+        worksheet.freeze_panes = "A2"
+        for column_cells in worksheet.columns:
+            header = str(column_cells[0].value or "")
+            max_len = len(header)
+            for cell in column_cells[1:]:
+                max_len = max(max_len, len(str(cell.value or "")))
+            worksheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 12), 60)
+        worksheet.auto_filter.ref = worksheet.dimensions
+    return output.getvalue()
 
 
 def fill_from_layout(template_bytes: bytes, label_sets: List[Dict[str, Any]], layout_df: pd.DataFrame, allow_overwrite: bool) -> bytes:
@@ -585,6 +731,7 @@ def main():
         st.header("Output behavior")
         skip_occupied = st.checkbox("Skip labels that already contain text", value=True)
         allow_overwrite = st.checkbox("Allow overwrite if edited layout targets used labels", value=False)
+        include_box_layout = st.checkbox("Add 10 x 10 box columns to inventory export", value=True)
         st.caption("If more labels are requested than fit on the existing page, the app adds another blank copy of the template page.")
 
     st.subheader("1. Build label ID sets")
@@ -629,6 +776,8 @@ def main():
         if st.button("Build editable layout", type="primary"):
             try:
                 st.session_state.layout_df = build_layout(st.session_state.label_sets, existing_occupied, skip_occupied)
+                st.session_state.generated_docx = None
+                st.session_state.generated_inventory_xlsx = None
                 st.success("Editable layout generated.")
             except Exception as exc:
                 st.error(str(exc))
@@ -685,8 +834,8 @@ def main():
                 st.session_state.layout_df[col] = edited_json[col]
 
         st.divider()
-        st.subheader("3. Generate DOCX")
-        if st.button("Generate filled DOCX from edited layout", type="primary"):
+        st.subheader("3. Generate files")
+        if st.button("Generate filled DOCX and inventory table", type="primary"):
             try:
                 output_bytes = fill_from_layout(
                     template_bytes=template_bytes,
@@ -694,15 +843,30 @@ def main():
                     layout_df=st.session_state.layout_df,
                     allow_overwrite=allow_overwrite,
                 )
-                st.success("DOCX generated.")
+                inventory_df = build_inventory_table(st.session_state.layout_df, include_box_layout=include_box_layout)
+                inventory_bytes = inventory_table_to_excel_bytes(inventory_df)
+                st.session_state.generated_docx = output_bytes
+                st.session_state.generated_inventory_xlsx = inventory_bytes
+                st.success("DOCX and inventory-style table generated.")
+            except Exception as exc:
+                st.error(str(exc))
+
+        if st.session_state.generated_docx is not None:
+            c_docx, c_xlsx = st.columns(2)
+            with c_docx:
                 st.download_button(
                     label="Download filled template",
-                    data=output_bytes,
+                    data=st.session_state.generated_docx,
                     file_name="filled_LCS_125WH_labels.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
-            except Exception as exc:
-                st.error(str(exc))
+            with c_xlsx:
+                st.download_button(
+                    label="Download Inventory-style Table",
+                    data=st.session_state.generated_inventory_xlsx,
+                    file_name="inventory_style_table.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
     else:
         st.info("Add one or more label sets, then click Build editable layout.")
 
