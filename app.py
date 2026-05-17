@@ -18,7 +18,7 @@ from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 APP_DIR = Path(__file__).parent
-DEFAULT_TEMPLATE = APP_DIR / "CryoSTUCK_labels.docx"
+DEFAULT_TEMPLATE = APP_DIR / "Letter-125-NO0424.docx"
 ROWS_PER_SHEET = 20
 LABELS_PER_ROW_GROUP = 5
 TOTAL_LABELS_PER_SHEET = ROWS_PER_SHEET * LABELS_PER_ROW_GROUP
@@ -91,7 +91,7 @@ def set_line_spacing(paragraph):
         p_pr.append(spacing)
     spacing.set(qn("w:before"), "0")
     spacing.set(qn("w:after"), "0")
-    spacing.set(qn("w:line"), "192")
+    spacing.set(qn("w:line"), "240")
     spacing.set(qn("w:lineRule"), "auto")
 
 
@@ -261,6 +261,10 @@ def init_state():
         st.session_state.label_sets = [new_label_set("Tissue", 1, 1, 20)]
     if "layout_df" not in st.session_state:
         st.session_state.layout_df = pd.DataFrame()
+    if "generated_docx" not in st.session_state:
+        st.session_state.generated_docx = None
+    if "generated_inventory_xlsx" not in st.session_state:
+        st.session_state.generated_inventory_xlsx = None
 
 
 def normalize_lines(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -537,6 +541,76 @@ def parse_json_list(value: Any) -> List[str]:
     return []
 
 
+def flatten_label_text(left_values: List[str], right_values: Optional[List[str]] = None) -> str:
+    """Combine line-level label text into one inventory-table cell.
+
+    Word labels can contain separate lines and tabbed right-side text. For the
+    inventory export, these are flattened into a semicolon-separated string so
+    the result is easy to sort, filter, and paste into freezer inventory sheets.
+    """
+    right_values = right_values or []
+    pieces = []
+    max_len = max(len(left_values), len(right_values))
+    for idx in range(max_len):
+        left = str(left_values[idx]) if idx < len(left_values) else ""
+        right = str(right_values[idx]) if idx < len(right_values) else ""
+        combined = "\t".join([part for part in [left, right] if part.strip()])
+        combined = re.sub(r"[\r\n\t]+", "; ", combined)
+        combined = re.sub(r"\s*;\s*", "; ", combined).strip(" ;")
+        if combined:
+            pieces.append(combined)
+    return "; ".join(pieces)
+
+
+def box_position(index_zero_based: int) -> Tuple[int, str, str]:
+    """Return 10 x 10 box coordinates using 1A, 2A ... 10A, 1B ... 10J."""
+    box_col = (index_zero_based % 10) + 1
+    box_row = chr(ord("A") + ((index_zero_based // 10) % 10))
+    grid_id = f"{box_col}{box_row}"
+    return box_col, box_row, grid_id
+
+
+def build_inventory_table(layout_df: pd.DataFrame, include_box_layout: bool = True) -> pd.DataFrame:
+    if layout_df.empty:
+        return pd.DataFrame(columns=["sample_id", "description"])
+
+    active_df = layout_df[layout_df.get("Use", True)].copy()
+    active_df = active_df.sort_values(["Sheet", "Row", "Label column", "Global #"], kind="stable")
+
+    rows = []
+    for inventory_idx, (_, layout_row) in enumerate(active_df.iterrows()):
+        circle_lefts = parse_json_list(layout_row.get("Circle left JSON", "[]"))
+        circle_rights = parse_json_list(layout_row.get("Circle right JSON", "[]"))
+        rect_lefts = parse_json_list(layout_row.get("Rectangle left JSON", "[]"))
+        rect_rights = parse_json_list(layout_row.get("Rectangle right JSON", "[]"))
+
+        entry = {
+            "sample_id": flatten_label_text(circle_lefts, circle_rights),
+            "description": flatten_label_text(rect_lefts, rect_rights),
+        }
+        if include_box_layout:
+            box_col, box_row, grid_id = box_position(inventory_idx)
+            entry.update({"box_column": box_col, "box_row": box_row, "grid_id": grid_id})
+        rows.append(entry)
+    return pd.DataFrame(rows)
+
+
+def inventory_table_to_excel_bytes(inventory_df: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        inventory_df.to_excel(writer, index=False, sheet_name="Inventory")
+        worksheet = writer.sheets["Inventory"]
+        worksheet.freeze_panes = "A2"
+        for column_cells in worksheet.columns:
+            header = str(column_cells[0].value or "")
+            max_len = len(header)
+            for cell in column_cells[1:]:
+                max_len = max(max_len, len(str(cell.value or "")))
+            worksheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 12), 60)
+        worksheet.auto_filter.ref = worksheet.dimensions
+    return output.getvalue()
+
+
 def fill_from_layout(template_bytes: bytes, label_sets: List[Dict[str, Any]], layout_df: pd.DataFrame, allow_overwrite: bool) -> bytes:
     doc = Document(io.BytesIO(template_bytes))
     errors = validate_template(doc)
@@ -657,6 +731,7 @@ def main():
         st.header("Output behavior")
         skip_occupied = st.checkbox("Skip labels that already contain text", value=True)
         allow_overwrite = st.checkbox("Allow overwrite if edited layout targets used labels", value=False)
+        include_box_layout = st.checkbox("Add 10 x 10 box columns to inventory export", value=True)
         st.caption("If more labels are requested than fit on the existing page, the app adds another blank copy of the template page.")
 
     st.subheader("1. Build label ID sets")
@@ -701,6 +776,8 @@ def main():
         if st.button("Build editable layout", type="primary"):
             try:
                 st.session_state.layout_df = build_layout(st.session_state.label_sets, existing_occupied, skip_occupied)
+                st.session_state.generated_docx = None
+                st.session_state.generated_inventory_xlsx = None
                 st.success("Editable layout generated.")
             except Exception as exc:
                 st.error(str(exc))
@@ -757,8 +834,8 @@ def main():
                 st.session_state.layout_df[col] = edited_json[col]
 
         st.divider()
-        st.subheader("3. Generate DOCX")
-        if st.button("Generate filled DOCX from edited layout", type="primary"):
+        st.subheader("3. Generate files")
+        if st.button("Generate filled DOCX and inventory table", type="primary"):
             try:
                 output_bytes = fill_from_layout(
                     template_bytes=template_bytes,
@@ -766,15 +843,30 @@ def main():
                     layout_df=st.session_state.layout_df,
                     allow_overwrite=allow_overwrite,
                 )
-                st.success("DOCX generated.")
+                inventory_df = build_inventory_table(st.session_state.layout_df, include_box_layout=include_box_layout)
+                inventory_bytes = inventory_table_to_excel_bytes(inventory_df)
+                st.session_state.generated_docx = output_bytes
+                st.session_state.generated_inventory_xlsx = inventory_bytes
+                st.success("DOCX and inventory-style table generated.")
+            except Exception as exc:
+                st.error(str(exc))
+
+        if st.session_state.generated_docx is not None:
+            c_docx, c_xlsx = st.columns(2)
+            with c_docx:
                 st.download_button(
                     label="Download filled template",
-                    data=output_bytes,
+                    data=st.session_state.generated_docx,
                     file_name="filled_LCS_125WH_labels.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
-            except Exception as exc:
-                st.error(str(exc))
+            with c_xlsx:
+                st.download_button(
+                    label="Download Inventory-style Table",
+                    data=st.session_state.generated_inventory_xlsx,
+                    file_name="inventory_style_table.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
     else:
         st.info("Add one or more label sets, then click Build editable layout.")
 
