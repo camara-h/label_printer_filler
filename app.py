@@ -18,7 +18,7 @@ from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 APP_DIR = Path(__file__).parent
-DEFAULT_TEMPLATE = APP_DIR / "Letter-125-NO0424.docx"
+DEFAULT_TEMPLATE = APP_DIR / "CryoSTUCK_labels.docx"
 ROWS_PER_SHEET = 20
 LABELS_PER_ROW_GROUP = 5
 TOTAL_LABELS_PER_SHEET = ROWS_PER_SHEET * LABELS_PER_ROW_GROUP
