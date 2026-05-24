@@ -18,7 +18,7 @@ from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 APP_DIR = Path(__file__).parent
-DEFAULT_TEMPLATE = APP_DIR / "Letter-125-NO0424.docx"
+DEFAULT_TEMPLATE = APP_DIR / "CryoSTUCK_labels.docx"
 ROWS_PER_SHEET = 20
 LABELS_PER_ROW_GROUP = 5
 TOTAL_LABELS_PER_SHEET = ROWS_PER_SHEET * LABELS_PER_ROW_GROUP
@@ -562,11 +562,18 @@ def flatten_label_text(left_values: List[str], right_values: Optional[List[str]]
     return "; ".join(pieces)
 
 
-def box_position(index_zero_based: int) -> Tuple[int, str, str]:
-    """Return 10 x 10 box coordinates using 1A, 2A ... 10A, 1B ... 10J."""
-    box_col = (index_zero_based % 10) + 1
-    box_row = chr(ord("A") + ((index_zero_based // 10) % 10))
-    grid_id = f"{box_col}{box_row}"
+def box_position(index_zero_based: int) -> Tuple[int, int, str]:
+    """Return 10 x 10 box coordinates filled top-to-bottom, then left-to-right.
+
+    Inventory/freezer boxes are commonly filled down one column first:
+    1A, 1B, 1C ... 1J, then 2A, 2B ... 10J. The exported
+    box_row column is numeric (1-10), while grid_id uses the familiar
+    row-letter convention.
+    """
+    box_col = ((index_zero_based // 10) % 10) + 1
+    box_row = (index_zero_based % 10) + 1
+    row_letter = chr(ord("A") + box_row - 1)
+    grid_id = f"{box_col}{row_letter}"
     return box_col, box_row, grid_id
 
 
@@ -575,7 +582,17 @@ def build_inventory_table(layout_df: pd.DataFrame, include_box_layout: bool = Tr
         return pd.DataFrame(columns=["sample_id", "description"])
 
     active_df = layout_df[layout_df.get("Use", True)].copy()
-    active_df = active_df.sort_values(["Sheet", "Row", "Label column", "Global #"], kind="stable")
+
+    # Inventory export should follow the generated/sample order, not the physical
+    # printed-template order. Sorting by Sheet/Row/Label column makes the export
+    # look like Tissue 1, Tissue 21, Tissue 41 because the label sheet has five
+    # vertical label columns. Global # preserves the intended serialization order,
+    # including manual edits made in the editable layout step.
+    if "Global #" in active_df.columns:
+        active_df["_inventory_order"] = pd.to_numeric(active_df["Global #"], errors="coerce")
+        active_df = active_df.sort_values(["_inventory_order"], kind="stable")
+    else:
+        active_df = active_df.reset_index(drop=True)
 
     rows = []
     for inventory_idx, (_, layout_row) in enumerate(active_df.iterrows()):
