@@ -2,6 +2,7 @@ import copy
 import io
 import json
 import re
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,7 +19,7 @@ from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 APP_DIR = Path(__file__).parent
-DEFAULT_TEMPLATE = APP_DIR / "CryoSTUCK_labels.docx"
+DEFAULT_TEMPLATE = APP_DIR / "Letter-125-NO0424.docx"
 ROWS_PER_SHEET = 20
 LABELS_PER_ROW_GROUP = 5
 TOTAL_LABELS_PER_SHEET = ROWS_PER_SHEET * LABELS_PER_ROW_GROUP
@@ -37,6 +38,8 @@ MIN_RECOMMENDED_FONT_SIZE = 5.0
 MAX_CIRCLE_LINES = 3
 MAX_RECTANGLE_LINES = 6
 RECOMMENDED_RECTANGLE_LINES = 5
+LABEL_LINE_SPACING_MULTIPLE = 0.8
+LABEL_LINE_SPACING_TWIPS = int(240 * LABEL_LINE_SPACING_MULTIPLE)
 
 
 def label_to_table_columns(label_column: int) -> Tuple[int, int]:
@@ -91,7 +94,7 @@ def set_line_spacing(paragraph):
         p_pr.append(spacing)
     spacing.set(qn("w:before"), "0")
     spacing.set(qn("w:after"), "0")
-    spacing.set(qn("w:line"), "240")
+    spacing.set(qn("w:line"), str(LABEL_LINE_SPACING_TWIPS))
     spacing.set(qn("w:lineRule"), "auto")
 
 
@@ -208,6 +211,14 @@ def ensure_sheet_count(doc: Document, desired_sheets: int):
     source_table_xml = copy.deepcopy(doc.tables[0]._tbl)
     body = doc._body._element
 
+    def append_before_section_properties(element):
+        """Append body elements before w:sectPr so Word does not repair the DOCX."""
+        sect_pr = body.find(qn("w:sectPr"))
+        if sect_pr is not None:
+            body.insert(body.index(sect_pr), element)
+        else:
+            body.append(element)
+
     while len(doc.tables) < desired_sheets:
         paragraph = OxmlElement("w:p")
         run = OxmlElement("w:r")
@@ -215,8 +226,8 @@ def ensure_sheet_count(doc: Document, desired_sheets: int):
         br.set(qn("w:type"), "page")
         run.append(br)
         paragraph.append(run)
-        body.append(paragraph)
-        body.append(copy.deepcopy(source_table_xml))
+        append_before_section_properties(paragraph)
+        append_before_section_properties(copy.deepcopy(source_table_xml))
 
     # Newly duplicated pages must be blank, even if the source template was partially filled.
     for table in doc.tables[1:]:
@@ -224,7 +235,6 @@ def ensure_sheet_count(doc: Document, desired_sheets: int):
             for row_idx in range(ROWS_PER_SHEET):
                 for col_idx in range(14):
                     clear_cell(table.cell(row_idx, col_idx))
-
 
 def default_lines(kind: str) -> List[Dict[str, Any]]:
     if kind == "circle":
@@ -271,6 +281,7 @@ def normalize_lines(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     clean = []
     for line in lines:
         clean.append({
+            "uid": str(line.get("uid") or uuid.uuid4().hex),
             "left_text": str(line.get("left_text", "")),
             "right_text": str(line.get("right_text", "")),
             "use_tab": bool(line.get("use_tab", False)),
@@ -307,8 +318,39 @@ def sync_line_widget_state(prefix: str, lines: List[Dict[str, Any]]) -> List[Dic
     return normalize_lines(lines)
 
 
+def clear_line_widget_state(prefix: str) -> None:
+    """Clear index-based line widgets after add/delete/reorder actions.
+
+    The edited line values are first saved into the canonical line list. Clearing
+    the old index-based widget keys prevents Streamlit from showing stale values
+    after a line is moved, deleted, or inserted.
+    """
+    prefixes = (
+        f"{prefix}_left_",
+        f"{prefix}_ser_left_",
+        f"{prefix}_tab_",
+        f"{prefix}_right_",
+        f"{prefix}_ser_right_",
+        f"{prefix}_tabpos_",
+        f"{prefix}_size_",
+        f"{prefix}_bold_",
+        f"{prefix}_align_",
+        f"{prefix}_color_",
+    )
+    for key in list(st.session_state.keys()):
+        if any(str(key).startswith(item) for item in prefixes):
+            del st.session_state[key]
+
+
+def save_and_rerun_line_editor(prefix: str, state_key: str, lines: List[Dict[str, Any]]) -> None:
+    st.session_state[state_key] = normalize_lines(lines)
+    clear_line_widget_state(prefix)
+    st.rerun()
+
+
 def line_defaults() -> Dict[str, Any]:
     return {
+        "uid": uuid.uuid4().hex,
         "left_text": "",
         "right_text": "",
         "use_tab": False,
@@ -361,7 +403,7 @@ def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]], max_lines:
         st.session_state[state_key] = normalize_lines(lines)
 
     # Keep the canonical line list in sync with any visible widget edits before
-    # handling add/remove buttons. This avoids stale values after Streamlit reruns.
+    # handling add/remove/reorder buttons. This avoids stale values after Streamlit reruns.
     lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
     st.session_state[state_key] = lines
 
@@ -381,29 +423,38 @@ def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]], max_lines:
             "Remove extra lines one at a time. The app will not delete them automatically."
         )
 
-    c_add, c_remove = st.columns(2)
-    with c_add:
-        add_disabled = max_lines is not None and len(lines) >= max_lines
-        add_clicked = st.button(f"Add line to {label.lower()}", key=f"add_{prefix}", disabled=add_disabled)
-        if add_disabled:
-            st.caption(f"Maximum reached: {label.lower()} labels are limited to {max_lines} lines.")
-        if add_clicked:
-            lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
-            if max_lines is None or len(lines) < max_lines:
-                lines.append(line_defaults())
-                st.session_state[state_key] = normalize_lines(lines)
-            st.rerun()
-    with c_remove:
-        remove_clicked = st.button(f"Remove last {label.lower()} line", key=f"remove_{prefix}", disabled=len(lines) == 0)
-        if remove_clicked:
-            lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
-            if lines:
-                lines.pop()
-                st.session_state[state_key] = normalize_lines(lines)
-            st.rerun()
+    add_disabled = max_lines is not None and len(lines) >= max_lines
+    add_clicked = st.button(f"Add line to {label.lower()}", key=f"add_{prefix}", disabled=add_disabled)
+    if add_disabled:
+        st.caption(f"Maximum reached: {label.lower()} labels are limited to {max_lines} lines.")
+    if add_clicked:
+        lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+        if max_lines is None or len(lines) < max_lines:
+            lines.append(line_defaults())
+            save_and_rerun_line_editor(prefix, state_key, lines)
 
     for idx, line in enumerate(lines):
         with st.expander(f"{label} line {idx + 1}", expanded=True):
+            action_cols = st.columns([1, 1, 1, 5])
+            with action_cols[0]:
+                if st.button("↑", key=f"{prefix}_move_up_{idx}", disabled=idx == 0, help="Move this line up"):
+                    lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+                    lines[idx - 1], lines[idx] = lines[idx], lines[idx - 1]
+                    save_and_rerun_line_editor(prefix, state_key, lines)
+            with action_cols[1]:
+                if st.button("↓", key=f"{prefix}_move_down_{idx}", disabled=idx >= len(lines) - 1, help="Move this line down"):
+                    lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+                    lines[idx + 1], lines[idx] = lines[idx], lines[idx + 1]
+                    save_and_rerun_line_editor(prefix, state_key, lines)
+            with action_cols[2]:
+                if st.button("🗑️", key=f"{prefix}_delete_{idx}", help="Delete this line"):
+                    lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+                    if 0 <= idx < len(lines):
+                        del lines[idx]
+                    save_and_rerun_line_editor(prefix, state_key, lines)
+            with action_cols[3]:
+                st.caption("Reorder or delete this line")
+
             line["left_text"] = st.text_input("Text", value=line.get("left_text", ""), key=f"{prefix}_left_{idx}")
             line["serialize_left"] = st.checkbox("Serialize trailing number in this text", value=line.get("serialize_left", False), key=f"{prefix}_ser_left_{idx}")
             line["use_tab"] = st.checkbox("Add tab and right text on this same line", value=line.get("use_tab", False), key=f"{prefix}_tab_{idx}")

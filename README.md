@@ -39,3 +39,13 @@ This version adds practical limits based on the physical label size:
 - Rectangle labels are limited to 6 lines, with an in-app warning after 5 lines.
 - Font sizes are limited to 4 to 7 pt. The app warns when 4 pt is used because it may be hard to read after printing.
 - Text color is still controlled per line using the HEX color picker.
+
+## Update notes
+
+This version improves the line editor and DOCX generation behavior:
+
+- Label lines can be moved up or down.
+- Individual label lines can be deleted with the trash button.
+- Circle and rectangle line limits are preserved.
+- Multi-page DOCX output inserts duplicated template pages before the section properties, which avoids Word repair/corruption warnings.
+- Label text uses 0.8 line spacing in the generated DOCX.
