@@ -19,7 +19,9 @@ from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 APP_DIR = Path(__file__).parent
-DEFAULT_TEMPLATE = APP_DIR / "CryoSTUCK_labels.docx"
+PREFERRED_TEMPLATE = APP_DIR / "CryoSTUCK_labels.docx"
+FALLBACK_TEMPLATE = APP_DIR / "Letter-125-NO0424.docx"
+DEFAULT_TEMPLATE = PREFERRED_TEMPLATE if PREFERRED_TEMPLATE.exists() else FALLBACK_TEMPLATE
 ROWS_PER_SHEET = 20
 LABELS_PER_ROW_GROUP = 5
 TOTAL_LABELS_PER_SHEET = ROWS_PER_SHEET * LABELS_PER_ROW_GROUP
@@ -296,57 +298,38 @@ def normalize_lines(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return clean
 
 
+def line_widget_key(prefix: str, line: Dict[str, Any], field: str) -> str:
+    """Return a widget key tied to a stable line UID instead of a row index.
+
+    Index-based widget keys make Streamlit keep values attached to the visual
+    position. After a move, those old position-based values can overwrite the
+    reordered list, making the ↑/↓ buttons look like they did nothing.
+    """
+    uid = str(line.get("uid") or uuid.uuid4().hex)
+    line["uid"] = uid
+    return f"{prefix}_{uid}_{field}"
+
+
 def sync_line_widget_state(prefix: str, lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Copy existing widget values back into the line data before add/remove actions.
-
-    Streamlit reruns the full script when a button is clicked. If the button is
-    placed before the line widgets, the app can otherwise rebuild from the old
-    saved line data and temporarily hide the editor. This keeps the source list
-    and visible widgets in sync on every rerun.
-    """
-    for idx, line in enumerate(lines):
-        line["left_text"] = st.session_state.get(f"{prefix}_left_{idx}", line.get("left_text", ""))
-        line["serialize_left"] = st.session_state.get(f"{prefix}_ser_left_{idx}", line.get("serialize_left", False))
-        line["use_tab"] = st.session_state.get(f"{prefix}_tab_{idx}", line.get("use_tab", False))
-        line["right_text"] = st.session_state.get(f"{prefix}_right_{idx}", line.get("right_text", ""))
-        line["serialize_right"] = st.session_state.get(f"{prefix}_ser_right_{idx}", line.get("serialize_right", False))
-        line["tab_pos"] = st.session_state.get(f"{prefix}_tabpos_{idx}", line.get("tab_pos", 1200))
-        line["font_size"] = st.session_state.get(f"{prefix}_size_{idx}", line.get("font_size", 6.0))
-        line["bold"] = st.session_state.get(f"{prefix}_bold_{idx}", line.get("bold", False))
-        line["align"] = st.session_state.get(f"{prefix}_align_{idx}", line.get("align", "Center"))
-        line["color"] = st.session_state.get(f"{prefix}_color_{idx}", line.get("color", "#000000"))
-    return normalize_lines(lines)
-
-
-def clear_line_widget_state(prefix: str) -> None:
-    """Clear index-based line widgets after add/delete/reorder actions.
-
-    The edited line values are first saved into the canonical line list. Clearing
-    the old index-based widget keys prevents Streamlit from showing stale values
-    after a line is moved, deleted, or inserted.
-    """
-    prefixes = (
-        f"{prefix}_left_",
-        f"{prefix}_ser_left_",
-        f"{prefix}_tab_",
-        f"{prefix}_right_",
-        f"{prefix}_ser_right_",
-        f"{prefix}_tabpos_",
-        f"{prefix}_size_",
-        f"{prefix}_bold_",
-        f"{prefix}_align_",
-        f"{prefix}_color_",
-    )
-    for key in list(st.session_state.keys()):
-        if any(str(key).startswith(item) for item in prefixes):
-            del st.session_state[key]
+    """Copy visible widget values back into their matching logical lines."""
+    synced = normalize_lines(lines)
+    for line in synced:
+        line["left_text"] = st.session_state.get(line_widget_key(prefix, line, "left"), line.get("left_text", ""))
+        line["serialize_left"] = st.session_state.get(line_widget_key(prefix, line, "ser_left"), line.get("serialize_left", False))
+        line["use_tab"] = st.session_state.get(line_widget_key(prefix, line, "tab"), line.get("use_tab", False))
+        line["right_text"] = st.session_state.get(line_widget_key(prefix, line, "right"), line.get("right_text", ""))
+        line["serialize_right"] = st.session_state.get(line_widget_key(prefix, line, "ser_right"), line.get("serialize_right", False))
+        line["tab_pos"] = st.session_state.get(line_widget_key(prefix, line, "tabpos"), line.get("tab_pos", 1200))
+        line["font_size"] = st.session_state.get(line_widget_key(prefix, line, "size"), line.get("font_size", 6.0))
+        line["bold"] = st.session_state.get(line_widget_key(prefix, line, "bold"), line.get("bold", False))
+        line["align"] = st.session_state.get(line_widget_key(prefix, line, "align"), line.get("align", "Center"))
+        line["color"] = st.session_state.get(line_widget_key(prefix, line, "color"), line.get("color", "#000000"))
+    return normalize_lines(synced)
 
 
 def save_and_rerun_line_editor(prefix: str, state_key: str, lines: List[Dict[str, Any]]) -> None:
     st.session_state[state_key] = normalize_lines(lines)
-    clear_line_widget_state(prefix)
     st.rerun()
-
 
 def line_defaults() -> Dict[str, Any]:
     return {
@@ -434,20 +417,22 @@ def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]], max_lines:
             save_and_rerun_line_editor(prefix, state_key, lines)
 
     for idx, line in enumerate(lines):
+        line = normalize_lines([line])[0]
+        line_uid = line["uid"]
         with st.expander(f"{label} line {idx + 1}", expanded=True):
             action_cols = st.columns([1, 1, 1, 5])
             with action_cols[0]:
-                if st.button("↑", key=f"{prefix}_move_up_{idx}", disabled=idx == 0, help="Move this line up"):
+                if st.button("↑", key=f"{prefix}_move_up_{line_uid}", disabled=idx == 0, help="Move this line up"):
                     lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
                     lines[idx - 1], lines[idx] = lines[idx], lines[idx - 1]
                     save_and_rerun_line_editor(prefix, state_key, lines)
             with action_cols[1]:
-                if st.button("↓", key=f"{prefix}_move_down_{idx}", disabled=idx >= len(lines) - 1, help="Move this line down"):
+                if st.button("↓", key=f"{prefix}_move_down_{line_uid}", disabled=idx >= len(lines) - 1, help="Move this line down"):
                     lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
                     lines[idx + 1], lines[idx] = lines[idx], lines[idx + 1]
                     save_and_rerun_line_editor(prefix, state_key, lines)
             with action_cols[2]:
-                if st.button("🗑️", key=f"{prefix}_delete_{idx}", help="Delete this line"):
+                if st.button("🗑️", key=f"{prefix}_delete_{line_uid}", help="Delete this line"):
                     lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
                     if 0 <= idx < len(lines):
                         del lines[idx]
@@ -455,13 +440,13 @@ def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]], max_lines:
             with action_cols[3]:
                 st.caption("Reorder or delete this line")
 
-            line["left_text"] = st.text_input("Text", value=line.get("left_text", ""), key=f"{prefix}_left_{idx}")
-            line["serialize_left"] = st.checkbox("Serialize trailing number in this text", value=line.get("serialize_left", False), key=f"{prefix}_ser_left_{idx}")
-            line["use_tab"] = st.checkbox("Add tab and right text on this same line", value=line.get("use_tab", False), key=f"{prefix}_tab_{idx}")
+            line["left_text"] = st.text_input("Text", value=line.get("left_text", ""), key=line_widget_key(prefix, line, "left"))
+            line["serialize_left"] = st.checkbox("Serialize trailing number in this text", value=line.get("serialize_left", False), key=line_widget_key(prefix, line, "ser_left"))
+            line["use_tab"] = st.checkbox("Add tab and right text on this same line", value=line.get("use_tab", False), key=line_widget_key(prefix, line, "tab"))
             if line["use_tab"]:
-                line["right_text"] = st.text_input("Right text after tab", value=line.get("right_text", ""), key=f"{prefix}_right_{idx}")
-                line["serialize_right"] = st.checkbox("Serialize trailing number in right text", value=line.get("serialize_right", False), key=f"{prefix}_ser_right_{idx}")
-                line["tab_pos"] = st.number_input("Right tab position, twips", min_value=300, max_value=2200, value=int(line.get("tab_pos", 1200)), step=50, key=f"{prefix}_tabpos_{idx}")
+                line["right_text"] = st.text_input("Right text after tab", value=line.get("right_text", ""), key=line_widget_key(prefix, line, "right"))
+                line["serialize_right"] = st.checkbox("Serialize trailing number in right text", value=line.get("serialize_right", False), key=line_widget_key(prefix, line, "ser_right"))
+                line["tab_pos"] = st.number_input("Right tab position, twips", min_value=300, max_value=2200, value=int(line.get("tab_pos", 1200)), step=50, key=line_widget_key(prefix, line, "tabpos"))
             else:
                 line["right_text"] = line.get("right_text", "")
                 line["serialize_right"] = line.get("serialize_right", False)
@@ -477,15 +462,16 @@ def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]], max_lines:
                     value=current_size,
                     step=0.5,
                     help=font_help_text(label),
-                    key=f"{prefix}_size_{idx}",
+                    key=line_widget_key(prefix, line, "size"),
                 )
             with c2:
-                line["bold"] = st.checkbox("Bold", value=bool(line.get("bold", False)), key=f"{prefix}_bold_{idx}")
+                line["bold"] = st.checkbox("Bold", value=bool(line.get("bold", False)), key=line_widget_key(prefix, line, "bold"))
             with c3:
-                line["align"] = st.selectbox("Alignment", options=DISPLAY_ALIGNMENTS, index=DISPLAY_ALIGNMENTS.index(line.get("align", "Center")), key=f"{prefix}_align_{idx}")
+                line["align"] = st.selectbox("Alignment", options=DISPLAY_ALIGNMENTS, index=DISPLAY_ALIGNMENTS.index(line.get("align", "Center")), key=line_widget_key(prefix, line, "align"))
             with c4:
-                line["color"] = st.color_picker("Text color", value=normalize_hex_color(line.get("color", "#000000")), key=f"{prefix}_color_{idx}")
+                line["color"] = st.color_picker("Text color", value=normalize_hex_color(line.get("color", "#000000")), key=line_widget_key(prefix, line, "color"))
 
+            lines[idx] = normalize_lines([line])[0]
     lines = normalize_lines(lines)
     st.session_state[state_key] = lines
     return lines
@@ -512,6 +498,40 @@ def next_position(sheet: int, row: int, col: int) -> Tuple[int, int, int]:
         col = 1
         sheet += 1
     return sheet, row, col
+
+
+def first_available_position(label_sets: List[Dict[str, Any]], occupied: set, skip_occupied: bool) -> Tuple[int, int, int]:
+    """Find the earliest open printed-label position after existing planned sets.
+
+    Scan order is top to bottom within a printed label column, then left to
+    right across label columns, then the next sheet. Example: if set 1 starts
+    at R1 C1 and has 15 labels, the next set starts at R16 C1; if it has 23
+    labels, the next set starts at R4 C2.
+    """
+    planned = set()
+    if label_sets:
+        try:
+            current_layout = build_layout(label_sets, occupied, skip_occupied)
+            for _, r in current_layout[current_layout.get("Use", True)].iterrows():
+                planned.add((int(r["Sheet"]), int(r["Row"]), int(r["Label column"])))
+        except Exception:
+            for label_set in label_sets:
+                sheet = int(label_set.get("start_sheet", 1))
+                row = int(label_set.get("start_row", 1))
+                col = int(label_set.get("start_col", 1))
+                for _ in range(int(label_set.get("count", 1))):
+                    planned.add((sheet, row, col))
+                    sheet, row, col = next_position(sheet, row, col)
+
+    sheet, row, col = 1, 1, 1
+    guard = 0
+    while guard < 50000:
+        candidate = (sheet, row, col)
+        if candidate not in planned and not (skip_occupied and candidate in occupied):
+            return candidate
+        sheet, row, col = next_position(sheet, row, col)
+        guard += 1
+    raise ValueError("Could not find an available starting position for the new label set.")
 
 
 def build_layout(label_sets: List[Dict[str, Any]], occupied: set, skip_occupied: bool) -> pd.DataFrame:
@@ -808,8 +828,10 @@ def main():
         if st.button("Add another Label ID Set", type="secondary"):
             previous = copy.deepcopy(st.session_state.label_sets[-1])
             previous["name"] = f"Set {len(st.session_state.label_sets) + 1}"
-            previous["start_col"] = min(5, int(previous.get("start_col", 1)) + 1)
-            previous["start_row"] = 1
+            next_sheet, next_row, next_col = first_available_position(st.session_state.label_sets, existing_occupied, skip_occupied)
+            previous["start_sheet"] = next_sheet
+            previous["start_row"] = next_row
+            previous["start_col"] = next_col
             st.session_state.label_sets.append(previous)
             st.rerun()
     with top_cols[1]:
