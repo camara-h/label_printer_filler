@@ -783,9 +783,50 @@ def layout_grid_html(layout_df: pd.DataFrame, occupied: set) -> str:
     return "".join(html_parts)
 
 
+def inject_custom_css():
+    st.markdown(
+        """
+        <style>
+        div[data-baseweb="tab-list"] {
+            gap: 0.45rem;
+            margin-top: 0.25rem;
+            margin-bottom: 0.45rem;
+        }
+        div[data-baseweb="tab-list"] button[role="tab"] {
+            background-color: #eeeeee;
+            border: 1px solid #b8b8b8;
+            border-radius: 0.55rem 0.55rem 0 0;
+            padding: 0.55rem 0.9rem;
+        }
+        div[data-baseweb="tab-list"] button[role="tab"] p {
+            color: #8A1538;
+            font-weight: 800;
+            font-size: 1.02rem;
+        }
+        div[data-baseweb="tab-list"] button[role="tab"][aria-selected="true"] {
+            background-color: #4a4a4a;
+            border-color: #4a4a4a;
+        }
+        div[data-baseweb="tab-list"] button[role="tab"][aria-selected="true"] p {
+            color: #ffffff;
+        }
+        div[data-baseweb="tab-list"] button[role="tab"]:hover {
+            background-color: #dcdcdc;
+            border-color: #8A1538;
+        }
+        div[data-baseweb="tab-list"] button[role="tab"][aria-selected="true"]:hover {
+            background-color: #3f3f3f;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def main():
     st.set_page_config(page_title="LabTAG LCS-125WH Label Filler", layout="wide")
     init_state()
+    inject_custom_css()
 
     st.title("LabTAG LCS-125WH Label Filler")
     st.caption("Uses the Word template as the source of truth and only writes formatted text into label cells.")
@@ -853,7 +894,8 @@ def main():
             with c5:
                 label_set["count"] = st.number_input("Labels to fill", min_value=1, max_value=1000, value=int(label_set.get("count", 20)), step=1, key=f"set_count_{set_idx}")
 
-            ltab, rtab = st.tabs(["Circle formatting", "Rectangle formatting"])
+            st.caption("Choose which part of the label to edit below.")
+            ltab, rtab = st.tabs(["● Circle formatting", "▰ Rectangle formatting"])
             with ltab:
                 label_set["circle_lines"] = line_editor(f"set{set_idx}_circle", "Circle", label_set.get("circle_lines", default_lines("circle")), max_lines=MAX_CIRCLE_LINES)
             with rtab:
