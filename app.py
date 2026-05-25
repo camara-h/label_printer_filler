@@ -241,22 +241,20 @@ def ensure_sheet_count(doc: Document, desired_sheets: int):
 def default_lines(kind: str) -> List[Dict[str, Any]]:
     if kind == "circle":
         return [
-            {"left_text": "Tissue 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Center", "serialize_left": True, "serialize_right": False, "tab_pos": 700, "color": "#000000"},
-            {"left_text": "EXP_ID", "right_text": "", "use_tab": False, "font_size": 5.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 700, "color": "#000000"},
+            {"left_text": "Main Info 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Center", "serialize_left": True, "serialize_right": False, "tab_pos": 700, "color": "#000000"},
+            {"left_text": "ELN:", "right_text": "", "use_tab": False, "font_size": 5.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 700, "color": "#000000"},
         ]
     return [
-        {"left_text": "Tissue 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Left", "serialize_left": True, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
-        {"left_text": "Tissue Biopsy", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Left", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
-        {"left_text": "EXP_ID", "right_text": "Exp_data", "use_tab": True, "font_size": 6.0, "bold": False, "align": "Left", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+        {"left_text": "Main Info 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Left", "serialize_left": True, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+        {"left_text": "Detailed Info:", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Left", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+        {"left_text": "Storage Info", "right_text": "Expiration Date", "use_tab": True, "font_size": 6.0, "bold": False, "align": "Left", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+        {"left_text": "ELN:", "right_text": "DD/MM/YYYY", "use_tab": True, "font_size": 6.0, "bold": False, "align": "Left", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
     ]
 
 
-def new_label_set(name="Tissue", start_row=1, start_col=1, count=20) -> Dict[str, Any]:
+def new_label_set(name="Label Set", start_row=1, start_col=1, count=20) -> Dict[str, Any]:
     circle = default_lines("circle")
     rectangle = default_lines("rectangle")
-    circle[0]["left_text"] = f"{name} 1"
-    rectangle[0]["left_text"] = f"{name} 1"
-    rectangle[1]["left_text"] = f"{name} Biopsy"
     return {
         "name": name,
         "start_sheet": 1,
@@ -270,7 +268,7 @@ def new_label_set(name="Tissue", start_row=1, start_col=1, count=20) -> Dict[str
 
 def init_state():
     if "label_sets" not in st.session_state:
-        st.session_state.label_sets = [new_label_set("Tissue", 1, 1, 20)]
+        st.session_state.label_sets = [new_label_set("Label Set 1", 1, 1, 20)]
     if "layout_df" not in st.session_state:
         st.session_state.layout_df = pd.DataFrame()
     if "generated_docx" not in st.session_state:
