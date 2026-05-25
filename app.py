@@ -40,7 +40,7 @@ MIN_RECOMMENDED_FONT_SIZE = 5.0
 MAX_CIRCLE_LINES = 3
 MAX_RECTANGLE_LINES = 6
 RECOMMENDED_RECTANGLE_LINES = 5
-LABEL_LINE_SPACING_MULTIPLE = 0.8
+LABEL_LINE_SPACING_MULTIPLE = 0.75
 LABEL_LINE_SPACING_TWIPS = int(240 * LABEL_LINE_SPACING_MULTIPLE)
 
 
@@ -245,9 +245,9 @@ def default_lines(kind: str) -> List[Dict[str, Any]]:
             {"left_text": "EXP_ID", "right_text": "", "use_tab": False, "font_size": 5.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 700, "color": "#000000"},
         ]
     return [
-        {"left_text": "Tissue 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Center", "serialize_left": True, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
-        {"left_text": "Tissue Biopsy", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
-        {"left_text": "EXP_ID", "right_text": "Exp_data", "use_tab": True, "font_size": 6.0, "bold": False, "align": "Right", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+        {"left_text": "Tissue 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Left", "serialize_left": True, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+        {"left_text": "Tissue Biopsy", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Left", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+        {"left_text": "EXP_ID", "right_text": "Exp_data", "use_tab": True, "font_size": 6.0, "bold": False, "align": "Left", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
     ]
 
 
@@ -331,7 +331,8 @@ def save_and_rerun_line_editor(prefix: str, state_key: str, lines: List[Dict[str
     st.session_state[state_key] = normalize_lines(lines)
     st.rerun()
 
-def line_defaults() -> Dict[str, Any]:
+def line_defaults(label: str = "") -> Dict[str, Any]:
+    default_align = "Left" if label.lower() == "rectangle" else "Center"
     return {
         "uid": uuid.uuid4().hex,
         "left_text": "",
@@ -339,7 +340,7 @@ def line_defaults() -> Dict[str, Any]:
         "use_tab": False,
         "font_size": 6.0,
         "bold": False,
-        "align": "Center",
+        "align": default_align,
         "serialize_left": False,
         "serialize_right": False,
         "tab_pos": 1000,
@@ -413,7 +414,7 @@ def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]], max_lines:
     if add_clicked:
         lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
         if max_lines is None or len(lines) < max_lines:
-            lines.append(line_defaults())
+            lines.append(line_defaults(label))
             save_and_rerun_line_editor(prefix, state_key, lines)
 
     for idx, line in enumerate(lines):
