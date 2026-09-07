@@ -1,14 +1,12 @@
 import copy
 import io
+import json
 import re
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
-try:
-    import qrcode
-except ModuleNotFoundError:
-    qrcode = None
 try:
     import streamlit as st
 except ModuleNotFoundError:
@@ -18,39 +16,32 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt, RGBColor, Inches
+from docx.shared import Pt, RGBColor
 
 APP_DIR = Path(__file__).parent
 PREFERRED_TEMPLATE = APP_DIR / "CryoSTUCK_labels.docx"
 FALLBACK_TEMPLATE = APP_DIR / "Letter-125-NO0424.docx"
 DEFAULT_TEMPLATE = PREFERRED_TEMPLATE if PREFERRED_TEMPLATE.exists() else FALLBACK_TEMPLATE
-
 ROWS_PER_SHEET = 20
 LABELS_PER_ROW_GROUP = 5
 TOTAL_LABELS_PER_SHEET = ROWS_PER_SHEET * LABELS_PER_ROW_GROUP
-BOX_ROWS = 10
-BOX_COLS = 10
-LABEL_LINE_SPACING_MULTIPLE = 0.75
-LABEL_LINE_SPACING_TWIPS = int(240 * LABEL_LINE_SPACING_MULTIPLE)
-MIN_FONT_SIZE = 4.0
-MAX_FONT_SIZE = 7.0
-MAX_CIRCLE_LINES = 3
-MAX_RECTANGLE_LINES = 6
-DEFAULT_QR_SIZE_INCHES = 0.16
-
-DEFAULT_CHAR_LIMITS = {
-    "Circle": {"7": 8, "6": 10, "5": 13, "4": 16},
-    "Rectangle": {"7": 18, "6": 24, "5": 30, "4": 38},
-}
 
 ALIGNMENTS = {
     "Left": WD_ALIGN_PARAGRAPH.LEFT,
     "Center": WD_ALIGN_PARAGRAPH.CENTER,
     "Right": WD_ALIGN_PARAGRAPH.RIGHT,
 }
+
 DISPLAY_ALIGNMENTS = list(ALIGNMENTS.keys())
-PRINT_PARTS = ["Circle", "Rectangle", "Ignore"]
-SIDES = ["Left/new line", "Right/tab on same line"]
+
+MIN_FONT_SIZE = 4.0
+MAX_FONT_SIZE = 7.0
+MIN_RECOMMENDED_FONT_SIZE = 5.0
+MAX_CIRCLE_LINES = 3
+MAX_RECTANGLE_LINES = 6
+RECOMMENDED_RECTANGLE_LINES = 5
+LABEL_LINE_SPACING_MULTIPLE = 0.75
+LABEL_LINE_SPACING_TWIPS = int(240 * LABEL_LINE_SPACING_MULTIPLE)
 
 
 def label_to_table_columns(label_column: int) -> Tuple[int, int]:
@@ -61,69 +52,15 @@ def label_to_table_columns(label_column: int) -> Tuple[int, int]:
     return circle_col, rectangle_col
 
 
-def next_position(sheet: int, row: int, col: int) -> Tuple[int, int, int]:
-    row += 1
-    if row > ROWS_PER_SHEET:
-        row = 1
-        col += 1
-    if col > LABELS_PER_ROW_GROUP:
-        col = 1
-        sheet += 1
-    return sheet, row, col
-
-
-def normalize_hex_color(value: Any, default: str = "#000000") -> str:
-    text = str(value or default).strip()
-    if not text.startswith("#"):
-        text = "#" + text
-    if re.fullmatch(r"#[0-9A-Fa-f]{6}", text):
-        return text.upper()
-    return default
-
-
-def normalize_column_name(value: Any) -> str:
-    return str(value or "").strip().lower().replace(" ", "_")
-
-
-def load_char_limit_config(uploaded_json=None) -> Dict[str, Dict[str, int]]:
-    config = copy.deepcopy(DEFAULT_CHAR_LIMITS)
-    if uploaded_json is None:
-        return config
-    try:
-        import json
-        raw = json.load(uploaded_json)
-        for part in ["Circle", "Rectangle"]:
-            if isinstance(raw.get(part), dict):
-                for size, limit in raw[part].items():
-                    try:
-                        config[part][str(int(float(size)))] = int(limit)
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-    return config
-
-
-def printable_length(text: str) -> int:
-    return len(str(text or "").replace("\t", " ").replace("\n", " "))
-
-
-def make_qr_image_bytes(value: str) -> Optional[io.BytesIO]:
-    if not value or qrcode is None:
-        return None
-    qr = qrcode.QRCode(
-        version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=4,
-        border=1,
-    )
-    qr.add_data(str(value))
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    bio = io.BytesIO()
-    img.save(bio, format="PNG")
-    bio.seek(0)
-    return bio
+def serialize_text(text: str, offset: int, enabled: bool) -> str:
+    if not enabled:
+        return text
+    match = re.search(r"(\d+)(?!.*\d)", text or "")
+    if not match:
+        return text or ""
+    number = match.group(1)
+    value = int(number) + offset
+    return (text or "")[: match.start()] + str(value).zfill(len(number)) + (text or "")[match.end() :]
 
 
 def clear_cell(cell):
@@ -135,7 +72,7 @@ def clear_cell(cell):
         t.getparent().remove(t)
 
 
-def set_cell_padding(cell, top="0", start="20", bottom="0", end="20"):
+def set_cell_padding(cell, top="0", start="0", bottom="0", end="0"):
     tc = cell._tc
     tc_pr = tc.get_or_add_tcPr()
     tc_mar = tc_pr.first_child_found_in("w:tcMar")
@@ -175,8 +112,17 @@ def add_tab_stop_right(paragraph, position_twips: int = 1200):
     tabs.append(tab)
 
 
+def normalize_hex_color(value: Any, default: str = "#000000") -> str:
+    text = str(value or default).strip()
+    if not text.startswith("#"):
+        text = "#" + text
+    if re.fullmatch(r"#[0-9A-Fa-f]{6}", text):
+        return text.upper()
+    return default
+
+
 def add_formatted_run(paragraph, text: str, font_size: float, bold: bool, color: str = "#000000"):
-    run = paragraph.add_run(str(text or ""))
+    run = paragraph.add_run(text or "")
     run.font.name = "Calibri"
     run._element.rPr.rFonts.set(qn("w:eastAsia"), "Calibri")
     run.font.size = Pt(float(font_size))
@@ -186,6 +132,37 @@ def add_formatted_run(paragraph, text: str, font_size: float, bold: bool, color:
     return run
 
 
+def write_cell_from_lines(cell, lines: List[Dict[str, Any]], label_offset: int = 0, override_left_texts: Optional[List[str]] = None, override_right_texts: Optional[List[str]] = None):
+    clear_cell(cell)
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    set_cell_padding(cell, top="0", start="20", bottom="0", end="20")
+
+    if not lines:
+        cell.add_paragraph("")
+        return
+
+    for idx, line in enumerate(lines):
+        paragraph = cell.add_paragraph()
+        paragraph.alignment = ALIGNMENTS.get(line.get("align", "Center"), WD_ALIGN_PARAGRAPH.CENTER)
+        set_line_spacing(paragraph)
+
+        if override_left_texts is None:
+            left_text = serialize_text(line.get("left_text", ""), label_offset, line.get("serialize_left", False))
+        else:
+            left_text = override_left_texts[idx] if idx < len(override_left_texts) else ""
+
+        if override_right_texts is None:
+            right_text = serialize_text(line.get("right_text", ""), label_offset, line.get("serialize_right", False))
+        else:
+            right_text = override_right_texts[idx] if idx < len(override_right_texts) else ""
+
+        add_formatted_run(paragraph, left_text, line.get("font_size", 6.0), line.get("bold", False), line.get("color", "#000000"))
+        if line.get("use_tab") and right_text:
+            add_tab_stop_right(paragraph, int(line.get("tab_pos", 1200)))
+            paragraph.add_run("\t")
+            add_formatted_run(paragraph, right_text, line.get("font_size", 6.0), line.get("bold", False), line.get("color", "#000000"))
+
+
 def cell_has_content(cell) -> bool:
     return bool(cell.text.strip())
 
@@ -193,7 +170,13 @@ def cell_has_content(cell) -> bool:
 def validate_template(doc: Document) -> List[str]:
     errors = []
     if len(doc.tables) < 1:
-        return ["No table found in template."]
+        errors.append("No table found in template.")
+        return errors
+    first_table = doc.tables[0]
+    if len(first_table.rows) != ROWS_PER_SHEET:
+        errors.append(f"Expected 20 rows in the first table, found {len(first_table.rows)}.")
+    if len(first_table.columns) != 14:
+        errors.append(f"Expected 14 columns in the first table, found {len(first_table.columns)}.")
     for i, table in enumerate(doc.tables, start=1):
         if len(table.rows) != ROWS_PER_SHEET or len(table.columns) != 14:
             errors.append(f"Table {i} does not match the expected 20 x 14 template structure.")
@@ -214,6 +197,13 @@ def get_existing_occupied_positions(template_bytes: bytes) -> set:
     return occupied
 
 
+def make_blank_table_copy(table):
+    new_tbl = copy.deepcopy(table._tbl)
+    # Wrap the copied XML in a temporary document so python-docx can expose cells cleanly.
+    # The copied XML is returned after clearing through a real table proxy in the target document.
+    return new_tbl
+
+
 def ensure_sheet_count(doc: Document, desired_sheets: int):
     if desired_sheets <= len(doc.tables):
         return
@@ -224,6 +214,7 @@ def ensure_sheet_count(doc: Document, desired_sheets: int):
     body = doc._body._element
 
     def append_before_section_properties(element):
+        """Append body elements before w:sectPr so Word does not repair the DOCX."""
         sect_pr = body.find(qn("w:sectPr"))
         if sect_pr is not None:
             body.insert(body.index(sect_pr), element)
@@ -240,384 +231,366 @@ def ensure_sheet_count(doc: Document, desired_sheets: int):
         append_before_section_properties(paragraph)
         append_before_section_properties(copy.deepcopy(source_table_xml))
 
+    # Newly duplicated pages must be blank, even if the source template was partially filled.
     for table in doc.tables[1:]:
         if len(table.rows) == ROWS_PER_SHEET and len(table.columns) == 14:
             for row_idx in range(ROWS_PER_SHEET):
                 for col_idx in range(14):
                     clear_cell(table.cell(row_idx, col_idx))
 
-
-def clean_cell_value(value: Any) -> str:
-    if pd.isna(value):
-        return ""
-    if hasattr(value, "strftime"):
-        # Excel date cells usually arrive as Timestamp/datetime. Use a lab-friendly date format.
-        try:
-            return value.strftime("%d/%m/%Y")
-        except Exception:
-            pass
-    text = str(value)
-    if text.endswith(".0"):
-        try:
-            as_float = float(text)
-            as_int = int(as_float)
-            if as_float == as_int:
-                return str(as_int)
-        except Exception:
-            pass
-    return text.strip()
-
-
-def flatten_label_text(lines: List[Dict[str, Any]]) -> str:
-    pieces = []
-    for line in lines:
-        left = str(line.get("left_text", "")).strip()
-        right = str(line.get("right_text", "")).strip()
-        combined = "\t".join([part for part in [left, right] if part])
-        combined = re.sub(r"[\r\n\t]+", "; ", combined)
-        combined = re.sub(r"\s*;\s*", "; ", combined).strip(" ;")
-        if combined:
-            pieces.append(combined)
-    return "; ".join(pieces)
-
-
-def box_position(index_zero_based: int) -> Tuple[int, int, str]:
-    box_col = ((index_zero_based // 10) % 10) + 1
-    box_row = (index_zero_based % 10) + 1
-    row_letter = chr(ord("A") + box_row - 1)
-    return box_col, box_row, f"{box_col}{row_letter}"
-
-
-def write_cell_from_lines(cell, lines: List[Dict[str, Any]], qr_text: str = "", qr_size_inches: float = DEFAULT_QR_SIZE_INCHES):
-    clear_cell(cell)
-    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-    set_cell_padding(cell, top="0", start="20", bottom="0", end="20")
-    if not lines and not qr_text:
-        cell.add_paragraph("")
-        return
-    for line in lines:
-        paragraph = cell.add_paragraph()
-        paragraph.alignment = ALIGNMENTS.get(line.get("align", "Center"), WD_ALIGN_PARAGRAPH.CENTER)
-        set_line_spacing(paragraph)
-        add_formatted_run(
-            paragraph,
-            line.get("left_text", ""),
-            line.get("font_size", 6.0),
-            line.get("bold", False),
-            line.get("color", "#000000"),
-        )
-        if line.get("right_text", ""):
-            add_tab_stop_right(paragraph, int(line.get("tab_pos", 1200)))
-            paragraph.add_run("\t")
-            add_formatted_run(
-                paragraph,
-                line.get("right_text", ""),
-                line.get("font_size", 6.0),
-                line.get("bold", False),
-                line.get("color", "#000000"),
-            )
-    if qr_text:
-        qr_image = make_qr_image_bytes(str(qr_text).strip())
-        if qr_image is not None:
-            paragraph = cell.add_paragraph()
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-            set_line_spacing(paragraph)
-            run = paragraph.add_run()
-            run.add_picture(qr_image, width=Inches(float(qr_size_inches)))
-
-
-def build_input_template_excel_bytes() -> bytes:
-    """Create a starter Excel file that users can download and fill in."""
-    columns = [
-        "CircleLine1",
-        "CircleLine2MainInfo",
-        "CircleLine3",
-        "RectangleLine1MainInfo",
-        "RectangleLine2",
-        "RectangleLine3",
-        "RectangleLine4",
-        "RectangleLine5",
-        "SetID",
-        "UniqueID",
-    ]
-    example_rows = [
-        [
-            "ELN:",
-            "Main Info 1",
-            "(Optional) Secondary info",
-            "Main Info 1",
-            "Detailed Info: concentration / solvent / condition",
-            "Storage Info",
-            "Expiration Date",
-            "ELN: DD/MM/YYYY",
-            "ExampleSet",
-            "IT000001",
-        ],
-        [
-            "ELN:",
-            "Main Info 2",
-            "(Optional) Secondary info",
-            "Main Info 2",
-            "Detailed Info: concentration / solvent / condition",
-            "Storage Info",
-            "Expiration Date",
-            "ELN: DD/MM/YYYY",
-            "ExampleSet",
-            "IT000002",
-        ],
-    ]
-    df = pd.DataFrame(example_rows, columns=columns)
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Labels")
-        ws = writer.sheets["Labels"]
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
-        widths = {
-            "A": 16, "B": 20, "C": 24, "D": 24, "E": 42,
-            "F": 22, "G": 22, "H": 22, "I": 16, "J": 16,
-        }
-        for col_letter, width in widths.items():
-            ws.column_dimensions[col_letter].width = width
-        for cell in ws[1]:
-            cell.font = cell.font.copy(bold=True)
-        note_sheet = writer.book.create_sheet("Instructions")
-        note_rows = [
-            ["How to use this template"],
-            ["Fill one row per label. Keep column names unchanged for easiest mapping."],
-            ["CircleLine1, CircleLine2MainInfo, CircleLine3 become the three circle lines."],
-            ["RectangleLine1MainInfo and RectangleLine2-5 become rectangle lines."],
-            ["SetID is optional and can group labels by collection type, experiment, or batch."],
-            ["UniqueID is optional. If filled and QR/barcode output is enabled, it can be encoded on the label."],
-            ["Non-main info can be left blank. Examples marked (Optional) are placeholders only."],
+def default_lines(kind: str) -> List[Dict[str, Any]]:
+    if kind == "circle":
+        return [
+            {"left_text": "Main Info 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Center", "serialize_left": True, "serialize_right": False, "tab_pos": 700, "color": "#000000"},
+            {"left_text": "ELN:", "right_text": "", "use_tab": False, "font_size": 5.0, "bold": False, "align": "Center", "serialize_left": False, "serialize_right": False, "tab_pos": 700, "color": "#000000"},
         ]
-        for r, values in enumerate(note_rows, start=1):
-            for c, value in enumerate(values, start=1):
-                note_sheet.cell(row=r, column=c).value = value
-        note_sheet.column_dimensions["A"].width = 100
-    output.seek(0)
-    return output.getvalue()
+    return [
+        {"left_text": "Main Info 1", "right_text": "", "use_tab": False, "font_size": 7.0, "bold": True, "align": "Left", "serialize_left": True, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+        {"left_text": "Detailed Info:", "right_text": "", "use_tab": False, "font_size": 6.0, "bold": False, "align": "Left", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+        {"left_text": "Storage Info", "right_text": "Expiration Date", "use_tab": True, "font_size": 6.0, "bold": False, "align": "Left", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+        {"left_text": "ELN:", "right_text": "DD/MM/YYYY", "use_tab": True, "font_size": 6.0, "bold": False, "align": "Left", "serialize_left": False, "serialize_right": False, "tab_pos": 1200, "color": "#000000"},
+    ]
 
 
-def read_input_table(uploaded_file) -> pd.DataFrame:
-    name = uploaded_file.name.lower()
-    if name.endswith(".csv"):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
-    df = df.dropna(axis=1, how="all")
-    df = df.dropna(axis=0, how="all")
-    df.columns = [str(c).strip() for c in df.columns]
-    df = df.loc[:, [not str(c).startswith("Unnamed") for c in df.columns]]
-    return df.reset_index(drop=True)
-
-
-def detect_position_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
-    normalized = {str(c).strip().lower().replace(" ", "_"): c for c in df.columns}
-    sheet_col = normalized.get("sheet") or normalized.get("print_sheet")
-    row_col = normalized.get("row") or normalized.get("print_row")
-    col_col = normalized.get("column") or normalized.get("label_column") or normalized.get("print_column")
-    return {"Sheet": sheet_col, "Row": row_col, "Label column": col_col}
-
-
-def default_mapping_for_columns(columns: List[str], setid_col: Optional[str] = None) -> pd.DataFrame:
-    rows = []
-    printable_cols = [c for c in columns if c != setid_col]
-    position_names = {"sheet", "print_sheet", "row", "print_row", "column", "label_column", "print_column"}
-    printable_cols = [c for c in printable_cols if str(c).strip().lower().replace(" ", "_") not in position_names]
-
-    # Preferred defaults for the downloadable spreadsheet template.
-    # These are intentionally name-aware so the template maps correctly even if
-    # users rearrange the columns in Excel.
-    named_defaults = {
-        "circleline1": {"part": "Circle", "line": 1, "align": "Center", "font_size": 5.0, "bold": False},
-        "circleline2maininfo": {"part": "Circle", "line": 2, "align": "Center", "font_size": 7.0, "bold": True},
-        "circleline3": {"part": "Circle", "line": 3, "align": "Center", "font_size": 5.0, "bold": False},
-        "rectangleline1maininfo": {"part": "Rectangle", "line": 1, "align": "Left", "font_size": 7.0, "bold": True},
-        "rectangleline2": {"part": "Rectangle", "line": 2, "align": "Left", "font_size": 6.0, "bold": False},
-        "rectangleline3": {"part": "Rectangle", "line": 3, "align": "Left", "font_size": 6.0, "bold": False},
-        "rectangleline4": {"part": "Rectangle", "line": 4, "align": "Left", "font_size": 6.0, "bold": False},
-        "rectangleline5": {"part": "Rectangle", "line": 5, "align": "Left", "font_size": 6.0, "bold": False},
+def new_label_set(name="Label Set", start_row=1, start_col=1, count=20) -> Dict[str, Any]:
+    circle = default_lines("circle")
+    rectangle = default_lines("rectangle")
+    return {
+        "name": name,
+        "start_sheet": 1,
+        "start_row": start_row,
+        "start_col": start_col,
+        "count": count,
+        "circle_lines": circle,
+        "rectangle_lines": rectangle,
     }
 
-    for idx, col in enumerate(printable_cols):
-        norm = normalize_column_name(col).replace("_", "")
-        if norm in named_defaults:
-            cfg = named_defaults[norm]
-            part = cfg["part"]
-            line = cfg["line"]
-            align = cfg["align"]
-            font_size = cfg["font_size"]
-            bold = cfg["bold"]
-        elif idx < MAX_CIRCLE_LINES:
-            part = "Circle"
-            line = idx + 1
-            align = "Center"
-            font_size = 7.0 if idx == 0 else 5.0
-            bold = True if idx == 0 else False
-        elif idx < MAX_CIRCLE_LINES + MAX_RECTANGLE_LINES:
-            part = "Rectangle"
-            line = idx - MAX_CIRCLE_LINES + 1
-            align = "Left"
-            font_size = 7.0 if line == 1 else 6.0
-            bold = True if line == 1 else False
+
+def init_state():
+    if "label_sets" not in st.session_state:
+        st.session_state.label_sets = [new_label_set("Label Set 1", 1, 1, 20)]
+    if "layout_df" not in st.session_state:
+        st.session_state.layout_df = pd.DataFrame()
+    if "generated_docx" not in st.session_state:
+        st.session_state.generated_docx = None
+    if "generated_inventory_xlsx" not in st.session_state:
+        st.session_state.generated_inventory_xlsx = None
+
+
+def normalize_lines(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    clean = []
+    for line in lines:
+        clean.append({
+            "uid": str(line.get("uid") or uuid.uuid4().hex),
+            "left_text": str(line.get("left_text", "")),
+            "right_text": str(line.get("right_text", "")),
+            "use_tab": bool(line.get("use_tab", False)),
+            "font_size": float(line.get("font_size", 6.0)),
+            "bold": bool(line.get("bold", False)),
+            "align": line.get("align", "Center") if line.get("align", "Center") in DISPLAY_ALIGNMENTS else "Center",
+            "serialize_left": bool(line.get("serialize_left", False)),
+            "serialize_right": bool(line.get("serialize_right", False)),
+            "tab_pos": int(line.get("tab_pos", 1200)),
+            "color": normalize_hex_color(line.get("color", "#000000")),
+        })
+    return clean
+
+
+def line_widget_key(prefix: str, line: Dict[str, Any], field: str) -> str:
+    """Return a widget key tied to a stable line UID instead of a row index.
+
+    Index-based widget keys make Streamlit keep values attached to the visual
+    position. After a move, those old position-based values can overwrite the
+    reordered list, making the ↑/↓ buttons look like they did nothing.
+    """
+    uid = str(line.get("uid") or uuid.uuid4().hex)
+    line["uid"] = uid
+    return f"{prefix}_{uid}_{field}"
+
+
+def sync_line_widget_state(prefix: str, lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Copy visible widget values back into their matching logical lines."""
+    synced = normalize_lines(lines)
+    for line in synced:
+        line["left_text"] = st.session_state.get(line_widget_key(prefix, line, "left"), line.get("left_text", ""))
+        line["serialize_left"] = st.session_state.get(line_widget_key(prefix, line, "ser_left"), line.get("serialize_left", False))
+        line["use_tab"] = st.session_state.get(line_widget_key(prefix, line, "tab"), line.get("use_tab", False))
+        line["right_text"] = st.session_state.get(line_widget_key(prefix, line, "right"), line.get("right_text", ""))
+        line["serialize_right"] = st.session_state.get(line_widget_key(prefix, line, "ser_right"), line.get("serialize_right", False))
+        line["tab_pos"] = st.session_state.get(line_widget_key(prefix, line, "tabpos"), line.get("tab_pos", 1200))
+        line["font_size"] = st.session_state.get(line_widget_key(prefix, line, "size"), line.get("font_size", 6.0))
+        line["bold"] = st.session_state.get(line_widget_key(prefix, line, "bold"), line.get("bold", False))
+        line["align"] = st.session_state.get(line_widget_key(prefix, line, "align"), line.get("align", "Center"))
+        line["color"] = st.session_state.get(line_widget_key(prefix, line, "color"), line.get("color", "#000000"))
+    return normalize_lines(synced)
+
+
+def save_and_rerun_line_editor(prefix: str, state_key: str, lines: List[Dict[str, Any]]) -> None:
+    st.session_state[state_key] = normalize_lines(lines)
+    st.rerun()
+
+def line_defaults(label: str = "") -> Dict[str, Any]:
+    default_align = "Left" if label.lower() == "rectangle" else "Center"
+    return {
+        "uid": uuid.uuid4().hex,
+        "left_text": "",
+        "right_text": "",
+        "use_tab": False,
+        "font_size": 6.0,
+        "bold": False,
+        "align": default_align,
+        "serialize_left": False,
+        "serialize_right": False,
+        "tab_pos": 1000,
+        "color": "#000000",
+    }
+
+
+def line_count_guidance(label: str, max_lines: Optional[int], recommended_lines: Optional[int]) -> None:
+    if label.lower() == "circle":
+        st.caption(
+            "Circle layout: up to 3 lines. Suggested 3-line format: font 5 plain for experiment info, "
+            "font 6 or 7 bold for the main label, and font 5 plain or bold for secondary information."
+        )
+    else:
+        st.caption(
+            "Rectangle layout: up to 6 lines. Labels usually print best with 5 lines or fewer. "
+            "Suggested format: line 1 font 7 bold for main info, lines 2 to 3 font 6 plain for complementary info, "
+            "and line 4 font 5 plain for Exp ID, date, or other reproducibility metadata."
+        )
+
+    st.caption(
+        "Font guidance: 7 bold is ideal for main information. 6 plain is good for concentrations, storage method, "
+        "solvent, or expiration date. 5 is good for Exp ID or date. 4 should only be used if space is very limited."
+    )
+
+
+def font_help_text(label: str) -> str:
+    if label.lower() == "circle":
+        fit_text = "Approximate circle fit: 7 pt works best for 6 to 8 characters, 6 pt for 8 to 10, 5 pt for 10 to 12, and 4 pt only for very short metadata."
+    else:
+        fit_text = "Approximate rectangle fit per line: 7 pt works best for 12 to 16 characters, 6 pt for 16 to 22, 5 pt for 22 to 28, and 4 pt only when space is very limited."
+    return (
+        "Allowed range: 4 to 7 pt. Recommended: 5 to 7 pt. "
+        "7 bold is ideal for main information. 6 plain is good for important additional information. "
+        "5 is good for reproducibility metadata. 4 should only be used if space is very limited. "
+        + fit_text
+    )
+
+
+def line_editor(prefix: str, label: str, lines: List[Dict[str, Any]], max_lines: Optional[int] = None, recommended_lines: Optional[int] = None) -> List[Dict[str, Any]]:
+    state_key = f"{prefix}_lines_state"
+
+    if state_key not in st.session_state:
+        st.session_state[state_key] = normalize_lines(lines)
+
+    # Keep the canonical line list in sync with any visible widget edits before
+    # handling add/remove/reorder buttons. This avoids stale values after Streamlit reruns.
+    lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+    st.session_state[state_key] = lines
+
+    line_count_guidance(label, max_lines, recommended_lines)
+
+    if max_lines is not None and len(lines) >= max_lines:
+        if label.lower() == "circle":
+            st.warning(f"Circle labels are limited to {max_lines} lines because additional lines usually do not print correctly.")
         else:
-            part = "Ignore"
-            line = 1
-            align = "Left"
-            font_size = 6.0
-            bold = False
-        rows.append({
-            "source_column": col,
-            "print_part": part,
-            "line": line,
-            "side": "Left/new line",
-            "font_size": font_size,
-            "bold": bold,
-            "align": align,
-            "color": "#000000",
-            "tab_pos": 1200,
-        })
-    return pd.DataFrame(rows)
+            st.warning(f"Maximum reached: rectangle labels are limited to {max_lines} lines.")
+    elif recommended_lines is not None and len(lines) >= recommended_lines:
+        st.warning(f"Rectangle labels usually print best with {recommended_lines} lines or fewer. You can use up to {max_lines} lines if needed.")
 
+    if max_lines is not None and len(lines) > max_lines:
+        st.warning(
+            f"{label} has {len(lines)} lines, which is above the recommended app limit of {max_lines}. "
+            "Remove extra lines one at a time. The app will not delete them automatically."
+        )
 
-def normalize_mapping(mapping_df: pd.DataFrame) -> pd.DataFrame:
-    mapping_df = mapping_df.copy()
-    for col, default in [
-        ("print_part", "Ignore"), ("line", 1), ("side", "Left/new line"),
-        ("font_size", 6.0), ("bold", False), ("align", "Left"),
-        ("color", "#000000"), ("tab_pos", 1200)
-    ]:
-        if col not in mapping_df.columns:
-            mapping_df[col] = default
-    mapping_df["print_part"] = mapping_df["print_part"].where(mapping_df["print_part"].isin(PRINT_PARTS), "Ignore")
-    mapping_df["side"] = mapping_df["side"].where(mapping_df["side"].isin(SIDES), "Left/new line")
-    mapping_df["line"] = pd.to_numeric(mapping_df["line"], errors="coerce").fillna(1).astype(int)
-    mapping_df["font_size"] = pd.to_numeric(mapping_df["font_size"], errors="coerce").fillna(6.0).clip(MIN_FONT_SIZE, MAX_FONT_SIZE)
-    mapping_df["bold"] = mapping_df["bold"].fillna(False).astype(bool)
-    mapping_df["align"] = mapping_df["align"].where(mapping_df["align"].isin(DISPLAY_ALIGNMENTS), "Left")
-    mapping_df["color"] = mapping_df["color"].apply(normalize_hex_color)
-    mapping_df["tab_pos"] = pd.to_numeric(mapping_df["tab_pos"], errors="coerce").fillna(1200).astype(int).clip(300, 2200)
-    return mapping_df
+    add_disabled = max_lines is not None and len(lines) >= max_lines
+    add_clicked = st.button(f"Add line to {label.lower()}", key=f"add_{prefix}", disabled=add_disabled)
+    if add_disabled:
+        st.caption(f"Maximum reached: {label.lower()} labels are limited to {max_lines} lines.")
+    if add_clicked:
+        lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+        if max_lines is None or len(lines) < max_lines:
+            lines.append(line_defaults(label))
+            save_and_rerun_line_editor(prefix, state_key, lines)
 
+    for idx, line in enumerate(lines):
+        line = normalize_lines([line])[0]
+        line_uid = line["uid"]
+        with st.expander(f"{label} line {idx + 1}", expanded=True):
+            action_cols = st.columns([1, 1, 1, 5])
+            with action_cols[0]:
+                if st.button("↑", key=f"{prefix}_move_up_{line_uid}", disabled=idx == 0, help="Move this line up"):
+                    lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+                    lines[idx - 1], lines[idx] = lines[idx], lines[idx - 1]
+                    save_and_rerun_line_editor(prefix, state_key, lines)
+            with action_cols[1]:
+                if st.button("↓", key=f"{prefix}_move_down_{line_uid}", disabled=idx >= len(lines) - 1, help="Move this line down"):
+                    lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+                    lines[idx + 1], lines[idx] = lines[idx], lines[idx + 1]
+                    save_and_rerun_line_editor(prefix, state_key, lines)
+            with action_cols[2]:
+                if st.button("🗑️", key=f"{prefix}_delete_{line_uid}", help="Delete this line"):
+                    lines = sync_line_widget_state(prefix, normalize_lines(st.session_state[state_key]))
+                    if 0 <= idx < len(lines):
+                        del lines[idx]
+                    save_and_rerun_line_editor(prefix, state_key, lines)
+            with action_cols[3]:
+                st.caption("Reorder or delete this line")
 
-def mapping_warnings(mapping_df: pd.DataFrame) -> List[str]:
-    warnings = []
-    active = mapping_df[mapping_df["print_part"] != "Ignore"].copy()
-    circle_lines = set(active.loc[active["print_part"] == "Circle", "line"].astype(int).tolist())
-    rect_lines = set(active.loc[active["print_part"] == "Rectangle", "line"].astype(int).tolist())
-    if any(line < 1 or line > MAX_CIRCLE_LINES for line in circle_lines):
-        warnings.append("Circle lines must be 1 to 3. Columns mapped outside that range will not be written correctly.")
-    if any(line < 1 or line > MAX_RECTANGLE_LINES for line in rect_lines):
-        warnings.append("Rectangle lines must be 1 to 6. Columns mapped outside that range will not be written correctly.")
-    for part, max_lines in [("Circle", MAX_CIRCLE_LINES), ("Rectangle", MAX_RECTANGLE_LINES)]:
-        part_df = active[active["print_part"] == part]
-        for line in range(1, max_lines + 1):
-            left_count = len(part_df[(part_df["line"] == line) & (part_df["side"] == "Left/new line")])
-            right_count = len(part_df[(part_df["line"] == line) & (part_df["side"] == "Right/tab on same line")])
-            if left_count > 1:
-                warnings.append(f"{part} line {line} has more than one left/new-line column. Only the first one will be used.")
-            if right_count > 1:
-                warnings.append(f"{part} line {line} has more than one right/tab column. Only the first one will be used.")
-    return warnings
+            line["left_text"] = st.text_input("Text", value=line.get("left_text", ""), key=line_widget_key(prefix, line, "left"))
+            line["serialize_left"] = st.checkbox("Serialize trailing number in this text", value=line.get("serialize_left", False), key=line_widget_key(prefix, line, "ser_left"))
+            line["use_tab"] = st.checkbox("Add tab and right text on this same line", value=line.get("use_tab", False), key=line_widget_key(prefix, line, "tab"))
+            if line["use_tab"]:
+                line["right_text"] = st.text_input("Right text after tab", value=line.get("right_text", ""), key=line_widget_key(prefix, line, "right"))
+                line["serialize_right"] = st.checkbox("Serialize trailing number in right text", value=line.get("serialize_right", False), key=line_widget_key(prefix, line, "ser_right"))
+                line["tab_pos"] = st.number_input("Right tab position, twips", min_value=300, max_value=2200, value=int(line.get("tab_pos", 1200)), step=50, key=line_widget_key(prefix, line, "tabpos"))
+            else:
+                line["right_text"] = line.get("right_text", "")
+                line["serialize_right"] = line.get("serialize_right", False)
 
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                current_size = float(line.get("font_size", 6.0))
+                current_size = min(MAX_FONT_SIZE, max(MIN_FONT_SIZE, current_size))
+                line["font_size"] = st.number_input(
+                    "Font size",
+                    min_value=MIN_FONT_SIZE,
+                    max_value=MAX_FONT_SIZE,
+                    value=current_size,
+                    step=0.5,
+                    help=font_help_text(label),
+                    key=line_widget_key(prefix, line, "size"),
+                )
+            with c2:
+                line["bold"] = st.checkbox("Bold", value=bool(line.get("bold", False)), key=line_widget_key(prefix, line, "bold"))
+            with c3:
+                line["align"] = st.selectbox("Alignment", options=DISPLAY_ALIGNMENTS, index=DISPLAY_ALIGNMENTS.index(line.get("align", "Center")), key=line_widget_key(prefix, line, "align"))
+            with c4:
+                line["color"] = st.color_picker("Text color", value=normalize_hex_color(line.get("color", "#000000")), key=line_widget_key(prefix, line, "color"))
 
-def build_label_lines_for_row(row: pd.Series, mapping_df: pd.DataFrame, part: str) -> List[Dict[str, Any]]:
-    max_lines = MAX_CIRCLE_LINES if part == "Circle" else MAX_RECTANGLE_LINES
-    lines = []
-    part_df = mapping_df[mapping_df["print_part"] == part].copy()
-    for line_num in range(1, max_lines + 1):
-        line_map = part_df[part_df["line"].astype(int) == line_num]
-        left_maps = line_map[line_map["side"] == "Left/new line"]
-        right_maps = line_map[line_map["side"] == "Right/tab on same line"]
-        if left_maps.empty and right_maps.empty:
-            continue
-
-        style_source = left_maps.iloc[0] if not left_maps.empty else right_maps.iloc[0]
-        left_text = clean_cell_value(row.get(style_source["source_column"], "")) if not left_maps.empty else ""
-        right_text = clean_cell_value(row.get(right_maps.iloc[0]["source_column"], "")) if not right_maps.empty else ""
-        if not left_text and not right_text:
-            continue
-        lines.append({
-            "left_text": left_text,
-            "right_text": right_text,
-            "font_size": float(style_source.get("font_size", 6.0)),
-            "bold": bool(style_source.get("bold", False)),
-            "align": style_source.get("align", "Center" if part == "Circle" else "Left"),
-            "color": normalize_hex_color(style_source.get("color", "#000000")),
-            "tab_pos": int(style_source.get("tab_pos", 1200)),
-        })
+            lines[idx] = normalize_lines([line])[0]
+    lines = normalize_lines(lines)
+    st.session_state[state_key] = lines
     return lines
 
+def line_texts_for_label(lines: List[Dict[str, Any]], offset: int) -> Tuple[List[str], List[str], str]:
+    lefts = []
+    rights = []
+    display = []
+    for line in lines:
+        left = serialize_text(line.get("left_text", ""), offset, line.get("serialize_left", False))
+        right = serialize_text(line.get("right_text", ""), offset, line.get("serialize_right", False))
+        lefts.append(left)
+        rights.append(right)
+        display.append(left + ((" | " + right) if line.get("use_tab") and right else ""))
+    return lefts, rights, " / ".join(display)
 
-def positions_for_count(count: int, occupied: set, skip_occupied: bool, start_sheet: int, start_row: int, start_col: int) -> List[Tuple[int, int, int]]:
-    positions = []
-    sheet, row, col = int(start_sheet), int(start_row), int(start_col)
+
+def next_position(sheet: int, row: int, col: int) -> Tuple[int, int, int]:
+    row += 1
+    if row > ROWS_PER_SHEET:
+        row = 1
+        col += 1
+    if col > LABELS_PER_ROW_GROUP:
+        col = 1
+        sheet += 1
+    return sheet, row, col
+
+
+def first_available_position(label_sets: List[Dict[str, Any]], occupied: set, skip_occupied: bool) -> Tuple[int, int, int]:
+    """Find the earliest open printed-label position after existing planned sets.
+
+    Scan order is top to bottom within a printed label column, then left to
+    right across label columns, then the next sheet. Example: if set 1 starts
+    at R1 C1 and has 15 labels, the next set starts at R16 C1; if it has 23
+    labels, the next set starts at R4 C2.
+    """
+    planned = set()
+    if label_sets:
+        try:
+            current_layout = build_layout(label_sets, occupied, skip_occupied)
+            for _, r in current_layout[current_layout.get("Use", True)].iterrows():
+                planned.add((int(r["Sheet"]), int(r["Row"]), int(r["Label column"])))
+        except Exception:
+            for label_set in label_sets:
+                sheet = int(label_set.get("start_sheet", 1))
+                row = int(label_set.get("start_row", 1))
+                col = int(label_set.get("start_col", 1))
+                for _ in range(int(label_set.get("count", 1))):
+                    planned.add((sheet, row, col))
+                    sheet, row, col = next_position(sheet, row, col)
+
+    sheet, row, col = 1, 1, 1
     guard = 0
-    while len(positions) < count:
-        guard += 1
-        if guard > count + 50000:
-            raise ValueError("Could not find enough available label positions.")
+    while guard < 50000:
         candidate = (sheet, row, col)
-        if not (skip_occupied and candidate in occupied):
-            positions.append(candidate)
+        if candidate not in planned and not (skip_occupied and candidate in occupied):
+            return candidate
         sheet, row, col = next_position(sheet, row, col)
-    return positions
+        guard += 1
+    raise ValueError("Could not find an available starting position for the new label set.")
 
 
-def build_labels_from_input(df: pd.DataFrame, mapping_df: pd.DataFrame, setid_col: Optional[str], unique_id_col: Optional[str], occupied: set, skip_occupied: bool, start_sheet: int, start_row: int, start_col: int) -> pd.DataFrame:
-    mapping_df = normalize_mapping(mapping_df)
-    positions = positions_for_count(len(df), occupied, skip_occupied, start_sheet, start_row, start_col)
+def build_layout(label_sets: List[Dict[str, Any]], occupied: set, skip_occupied: bool) -> pd.DataFrame:
     rows = []
-    for i, (_, source_row) in enumerate(df.iterrows()):
-        sheet, row, col = positions[i]
-        circle_lines = build_label_lines_for_row(source_row, mapping_df, "Circle")
-        rect_lines = build_label_lines_for_row(source_row, mapping_df, "Rectangle")
-        set_id = clean_cell_value(source_row.get(setid_col, "")) if setid_col else ""
-        unique_id = clean_cell_value(source_row.get(unique_id_col, "")) if unique_id_col else ""
-        rows.append({
-            "Use": True,
-            "Input row": i + 2,
-            "Set ID": set_id,
-            "Unique ID": unique_id,
-            "Sheet": sheet,
-            "Row": row,
-            "Label column": col,
-            "Circle text": flatten_label_text(circle_lines),
-            "Rectangle text": flatten_label_text(rect_lines),
-            "Circle lines JSON": repr(circle_lines),
-            "Rectangle lines JSON": repr(rect_lines),
-        })
+    planned = set()
+    global_label_num = 1
+    for set_idx, label_set in enumerate(label_sets):
+        sheet = int(label_set.get("start_sheet", 1))
+        row = int(label_set.get("start_row", 1))
+        col = int(label_set.get("start_col", 1))
+        count = int(label_set.get("count", 1))
+        written_for_set = 0
+        guard = 0
+        while written_for_set < count:
+            guard += 1
+            if guard > count + 10000:
+                raise ValueError("Could not find enough available labels. Please check blocked spaces and starting position.")
+            candidate = (sheet, row, col)
+            unavailable = candidate in planned or (skip_occupied and candidate in occupied)
+            if not unavailable:
+                circle_lefts, circle_rights, circle_display = line_texts_for_label(label_set["circle_lines"], written_for_set)
+                rect_lefts, rect_rights, rect_display = line_texts_for_label(label_set["rectangle_lines"], written_for_set)
+                rows.append({
+                    "Use": True,
+                    "Global #": global_label_num,
+                    "Set #": set_idx + 1,
+                    "Set name": label_set.get("name", f"Set {set_idx + 1}"),
+                    "Within set #": written_for_set + 1,
+                    "Sheet": sheet,
+                    "Row": row,
+                    "Label column": col,
+                    "Circle text": circle_display,
+                    "Rectangle text": rect_display,
+                    "Circle left JSON": json.dumps(circle_lefts, ensure_ascii=False),
+                    "Circle right JSON": json.dumps(circle_rights, ensure_ascii=False),
+                    "Rectangle left JSON": json.dumps(rect_lefts, ensure_ascii=False),
+                    "Rectangle right JSON": json.dumps(rect_rights, ensure_ascii=False),
+                })
+                planned.add(candidate)
+                global_label_num += 1
+                written_for_set += 1
+            sheet, row, col = next_position(sheet, row, col)
     return pd.DataFrame(rows)
-
-
-def parse_lines_repr(value: Any) -> List[Dict[str, Any]]:
-    if isinstance(value, list):
-        return value
-    try:
-        parsed = eval(str(value), {"__builtins__": {}})  # generated by this app only; no user-facing Python needed.
-        if isinstance(parsed, list):
-            return parsed
-    except Exception:
-        return []
-    return []
 
 
 def layout_warnings(layout_df: pd.DataFrame, occupied: set) -> List[str]:
     warnings = []
     if layout_df.empty:
         return ["No labels were generated."]
-    active = layout_df[layout_df.get("Use", True)].copy()
-    bad = active[(active["Sheet"] < 1) | (active["Row"] < 1) | (active["Row"] > 20) | (active["Label column"] < 1) | (active["Label column"] > 5)]
+    bad = layout_df[(layout_df["Sheet"] < 1) | (layout_df["Row"] < 1) | (layout_df["Row"] > 20) | (layout_df["Label column"] < 1) | (layout_df["Label column"] > 5)]
     if not bad.empty:
-        warnings.append("Some positions are outside the valid range. Sheet must be at least 1, row must be 1 to 20, and label column must be 1 to 5.")
-    duplicated = active.groupby(["Sheet", "Row", "Label column"]).size().reset_index(name="n")
-    duplicated = duplicated[duplicated["n"] > 1]
+        warnings.append("Some edited positions are outside the valid range. Sheet must be at least 1, row must be 1 to 20, and label column must be 1 to 5.")
+    pos_counts = layout_df[layout_df.get("Use", True)].groupby(["Sheet", "Row", "Label column"]).size().reset_index(name="n")
+    duplicated = pos_counts[pos_counts["n"] > 1]
     if not duplicated.empty:
-        warnings.append("Some labels target the same printed position. Fix duplicates before generating.")
+        preview = ", ".join([f"sheet {int(r.Sheet)}, row {int(r.Row)}, column {int(r['Label column'])}" for _, r in duplicated.head(10).iterrows()])
+        warnings.append(f"Duplicate target positions in the editable layout: {preview}.")
     hits = []
-    for _, r in active.iterrows():
-        candidate = (int(r["Sheet"]), int(r["Row"]), int(r["Label column"]))
+    for _, row in layout_df[layout_df.get("Use", True)].iterrows():
+        candidate = (int(row["Sheet"]), int(row["Row"]), int(row["Label column"]))
         if candidate in occupied:
             hits.append(candidate)
     if hits:
@@ -626,82 +599,84 @@ def layout_warnings(layout_df: pd.DataFrame, occupied: set) -> List[str]:
     return warnings
 
 
+def parse_json_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(x) for x in value]
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return [str(x) for x in parsed]
+    except Exception:
+        pass
+    return []
 
-def character_fit_warnings(layout_df: pd.DataFrame, char_limits: Dict[str, Dict[str, int]]) -> List[str]:
-    warnings = []
-    if layout_df.empty:
-        return warnings
-    active = layout_df[layout_df.get("Use", True)].copy()
-    for _, r in active.iterrows():
-        label_pos = f"sheet {int(r.get('Sheet', 1))}, row {int(r.get('Row', 1))}, column {int(r.get('Label column', 1))}"
-        for part, json_col in [("Circle", "Circle lines JSON"), ("Rectangle", "Rectangle lines JSON")]:
-            for line_idx, line in enumerate(parse_lines_repr(r.get(json_col, "[]")), start=1):
-                text = " ".join([str(line.get("left_text", "")), str(line.get("right_text", ""))]).strip()
-                if not text:
-                    continue
-                size_key = str(int(round(float(line.get("font_size", 6.0)))))
-                limit = int(char_limits.get(part, {}).get(size_key, 9999))
-                length = printable_length(text)
-                if length > limit:
-                    warnings.append(f"{label_pos}: {part} line {line_idx} has about {length} characters at font {size_key}; suggested max is {limit}.")
-    return warnings
 
-def fill_from_layout(template_bytes: bytes, layout_df: pd.DataFrame, allow_overwrite: bool, add_qr_codes: bool = False, qr_size_inches: float = DEFAULT_QR_SIZE_INCHES) -> bytes:
-    doc = Document(io.BytesIO(template_bytes))
-    errors = validate_template(doc)
-    if errors:
-        raise ValueError("Template validation failed: " + " ".join(errors))
-    active = layout_df[layout_df.get("Use", True)].copy()
-    if active.empty:
-        raise ValueError("No active labels to write.")
-    occupied = get_existing_occupied_positions(template_bytes)
-    warnings = layout_warnings(active, occupied)
-    blocking = [w for w in warnings if "outside the valid range" in w or "same printed position" in w]
-    if blocking:
-        raise ValueError(" ".join(blocking))
-    if not allow_overwrite:
-        occupied_warnings = [w for w in warnings if "already contain text" in w]
-        if occupied_warnings:
-            raise ValueError(occupied_warnings[0] + " Enable overwrite to continue.")
-    ensure_sheet_count(doc, int(active["Sheet"].max()))
-    for _, layout_row in active.iterrows():
-        sheet = int(layout_row["Sheet"])
-        row_num = int(layout_row["Row"])
-        label_col = int(layout_row["Label column"])
-        circle_lines = parse_lines_repr(layout_row.get("Circle lines JSON", "[]"))
-        rect_lines = parse_lines_repr(layout_row.get("Rectangle lines JSON", "[]"))
-        unique_id = str(layout_row.get("Unique ID", "")).strip()
-        table = doc.tables[sheet - 1]
-        circle_col, rectangle_col = label_to_table_columns(label_col)
-        write_cell_from_lines(table.cell(row_num - 1, circle_col), circle_lines)
-        write_cell_from_lines(
-            table.cell(row_num - 1, rectangle_col),
-            rect_lines,
-            qr_text=unique_id if add_qr_codes and unique_id else "",
-            qr_size_inches=qr_size_inches,
-        )
-    output = io.BytesIO()
-    doc.save(output)
-    return output.getvalue()
+def flatten_label_text(left_values: List[str], right_values: Optional[List[str]] = None) -> str:
+    """Combine line-level label text into one inventory-table cell.
+
+    Word labels can contain separate lines and tabbed right-side text. For the
+    inventory export, these are flattened into a semicolon-separated string so
+    the result is easy to sort, filter, and paste into freezer inventory sheets.
+    """
+    right_values = right_values or []
+    pieces = []
+    max_len = max(len(left_values), len(right_values))
+    for idx in range(max_len):
+        left = str(left_values[idx]) if idx < len(left_values) else ""
+        right = str(right_values[idx]) if idx < len(right_values) else ""
+        combined = "\t".join([part for part in [left, right] if part.strip()])
+        combined = re.sub(r"[\r\n\t]+", "; ", combined)
+        combined = re.sub(r"\s*;\s*", "; ", combined).strip(" ;")
+        if combined:
+            pieces.append(combined)
+    return "; ".join(pieces)
+
+
+def box_position(index_zero_based: int) -> Tuple[int, int, str]:
+    """Return 10 x 10 box coordinates filled top-to-bottom, then left-to-right.
+
+    Inventory/freezer boxes are commonly filled down one column first:
+    1A, 1B, 1C ... 1J, then 2A, 2B ... 10J. The exported
+    box_row column is numeric (1-10), while grid_id uses the familiar
+    row-letter convention.
+    """
+    box_col = ((index_zero_based // 10) % 10) + 1
+    box_row = (index_zero_based % 10) + 1
+    row_letter = chr(ord("A") + box_row - 1)
+    grid_id = f"{box_col}{row_letter}"
+    return box_col, box_row, grid_id
 
 
 def build_inventory_table(layout_df: pd.DataFrame, include_box_layout: bool = True) -> pd.DataFrame:
-    active = layout_df[layout_df.get("Use", True)].copy() if not layout_df.empty else pd.DataFrame()
+    if layout_df.empty:
+        return pd.DataFrame(columns=["sample_id", "description"])
+
+    active_df = layout_df[layout_df.get("Use", True)].copy()
+
+    # Inventory export should follow the generated/sample order, not the physical
+    # printed-template order. Sorting by Sheet/Row/Label column makes the export
+    # look like Tissue 1, Tissue 21, Tissue 41 because the label sheet has five
+    # vertical label columns. Global # preserves the intended serialization order,
+    # including manual edits made in the editable layout step.
+    if "Global #" in active_df.columns:
+        active_df["_inventory_order"] = pd.to_numeric(active_df["Global #"], errors="coerce")
+        active_df = active_df.sort_values(["_inventory_order"], kind="stable")
+    else:
+        active_df = active_df.reset_index(drop=True)
+
     rows = []
-    for idx, (_, r) in enumerate(active.reset_index(drop=True).iterrows()):
-        circle_lines = parse_lines_repr(r.get("Circle lines JSON", "[]"))
-        rect_lines = parse_lines_repr(r.get("Rectangle lines JSON", "[]"))
+    for inventory_idx, (_, layout_row) in enumerate(active_df.iterrows()):
+        circle_lefts = parse_json_list(layout_row.get("Circle left JSON", "[]"))
+        circle_rights = parse_json_list(layout_row.get("Circle right JSON", "[]"))
+        rect_lefts = parse_json_list(layout_row.get("Rectangle left JSON", "[]"))
+        rect_rights = parse_json_list(layout_row.get("Rectangle right JSON", "[]"))
+
         entry = {
-            "sample_id": flatten_label_text(circle_lines),
-            "description": flatten_label_text(rect_lines),
+            "sample_id": flatten_label_text(circle_lefts, circle_rights),
+            "description": flatten_label_text(rect_lefts, rect_rights),
         }
-        unique_id = str(r.get("Unique ID", "")).strip() if "Unique ID" in r else ""
-        if unique_id:
-            entry["uniqueID"] = unique_id
-        if "Set ID" in r and str(r.get("Set ID", "")).strip():
-            entry["setID"] = str(r.get("Set ID", ""))
         if include_box_layout:
-            box_col, box_row, grid_id = box_position(idx)
+            box_col, box_row, grid_id = box_position(inventory_idx)
             entry.update({"box_column": box_col, "box_row": box_row, "grid_id": grid_id})
         rows.append(entry)
     return pd.DataFrame(rows)
@@ -723,22 +698,70 @@ def inventory_table_to_excel_bytes(inventory_df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
+def fill_from_layout(template_bytes: bytes, label_sets: List[Dict[str, Any]], layout_df: pd.DataFrame, allow_overwrite: bool) -> bytes:
+    doc = Document(io.BytesIO(template_bytes))
+    errors = validate_template(doc)
+    if errors:
+        raise ValueError("Template validation failed: " + " ".join(errors))
+
+    active_df = layout_df[layout_df.get("Use", True)].copy()
+    if active_df.empty:
+        raise ValueError("No active labels to write.")
+
+    warnings = layout_warnings(active_df, get_existing_occupied_positions(template_bytes))
+    blocking = [w for w in warnings if "outside the valid range" in w or "Duplicate target positions" in w]
+    if blocking:
+        raise ValueError(" ".join(blocking))
+    if not allow_overwrite:
+        occupied_warnings = [w for w in warnings if "already contain text" in w]
+        if occupied_warnings:
+            raise ValueError(occupied_warnings[0] + " Enable overwrite to continue.")
+
+    max_sheet = int(active_df["Sheet"].max())
+    ensure_sheet_count(doc, max_sheet)
+
+    for _, layout_row in active_df.iterrows():
+        set_idx = int(layout_row["Set #"]) - 1
+        if set_idx < 0 or set_idx >= len(label_sets):
+            raise ValueError("Editable layout refers to a label set that no longer exists. Rebuild the layout preview.")
+        label_set = label_sets[set_idx]
+        sheet = int(layout_row["Sheet"])
+        row_num = int(layout_row["Row"])
+        label_col = int(layout_row["Label column"])
+        if sheet < 1 or row_num < 1 or row_num > 20 or label_col < 1 or label_col > 5:
+            raise ValueError("All edited positions must be inside the valid sheet, row, and label column ranges.")
+
+        table = doc.tables[sheet - 1]
+        circle_col, rectangle_col = label_to_table_columns(label_col)
+
+        circle_lefts = parse_json_list(layout_row.get("Circle left JSON", "[]"))
+        circle_rights = parse_json_list(layout_row.get("Circle right JSON", "[]"))
+        rect_lefts = parse_json_list(layout_row.get("Rectangle left JSON", "[]"))
+        rect_rights = parse_json_list(layout_row.get("Rectangle right JSON", "[]"))
+
+        write_cell_from_lines(table.cell(row_num - 1, circle_col), label_set["circle_lines"], override_left_texts=circle_lefts, override_right_texts=circle_rights)
+        write_cell_from_lines(table.cell(row_num - 1, rectangle_col), label_set["rectangle_lines"], override_left_texts=rect_lefts, override_right_texts=rect_rights)
+
+    output = io.BytesIO()
+    doc.save(output)
+    return output.getvalue()
+
+
 def layout_grid_html(layout_df: pd.DataFrame, occupied: set) -> str:
     active = layout_df[layout_df.get("Use", True)].copy() if not layout_df.empty else pd.DataFrame()
     if active.empty:
         return "<p>No layout generated yet.</p>"
     max_sheet = max(1, int(active["Sheet"].max()))
-    html_parts = ["<style>.sheetgrid{border-collapse:collapse;margin-bottom:24px}.sheetgrid td,.sheetgrid th{border:1px solid #ddd;padding:4px;text-align:center;font-size:12px}.sheetgrid td{width:110px;height:34px}.used{background:#f7f7f7}.occupied{background:#ffe5e5}.planned{background:#e7f3ff}.conflict{background:#ffd3a8}</style>"]
+    html_parts = ["<style>.sheetgrid{border-collapse:collapse;margin-bottom:24px}.sheetgrid td,.sheetgrid th{border:1px solid #ddd;padding:4px;text-align:center;font-size:12px}.sheetgrid td{width:110px;height:34px}.used{background:#f7f7f7}.occupied{background:#ffe5e5}.planned{background:#e7f3ff}.conflict{background:#ffd3a8}.small{font-size:11px;color:#555}</style>"]
     pos_to_text = {}
     duplicates = set()
-    for idx, r in active.iterrows():
+    for _, r in active.iterrows():
         key = (int(r["Sheet"]), int(r["Row"]), int(r["Label column"]))
-        text = str(r.get("Circle text", ""))[:28]
         if key in pos_to_text:
             duplicates.add(key)
-            pos_to_text[key] += f"<br>⚠ {text}"
+            pos_to_text[key] += f"<br>⚠ {r['Set name']} #{int(r['Within set #'])}"
         else:
-            pos_to_text[key] = text
+            pos_to_text[key] = f"{r['Set name']} #{int(r['Within set #'])}"
     for sheet in range(1, max_sheet + 1):
         html_parts.append(f"<h4>Sheet {sheet}</h4><table class='sheetgrid'><tr><th>Row</th>" + "".join([f"<th>Label col {c}</th>" for c in range(1, 6)]) + "</tr>")
         for row in range(1, 21):
@@ -763,6 +786,11 @@ def inject_custom_css():
     st.markdown(
         """
         <style>
+        div[data-baseweb="tab-list"] {
+            gap: 0.45rem;
+            margin-top: 0.25rem;
+            margin-bottom: 0.45rem;
+        }
         div[data-baseweb="tab-list"] button[role="tab"] {
             background-color: #eeeeee;
             border: 1px solid #b8b8b8;
@@ -772,6 +800,7 @@ def inject_custom_css():
         div[data-baseweb="tab-list"] button[role="tab"] p {
             color: #8A1538;
             font-weight: 800;
+            font-size: 1.02rem;
         }
         div[data-baseweb="tab-list"] button[role="tab"][aria-selected="true"] {
             background-color: #4a4a4a;
@@ -780,43 +809,37 @@ def inject_custom_css():
         div[data-baseweb="tab-list"] button[role="tab"][aria-selected="true"] p {
             color: #ffffff;
         }
+        div[data-baseweb="tab-list"] button[role="tab"]:hover {
+            background-color: #dcdcdc;
+            border-color: #8A1538;
+        }
+        div[data-baseweb="tab-list"] button[role="tab"][aria-selected="true"]:hover {
+            background-color: #3f3f3f;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-def init_state():
-    if "mapping_df" not in st.session_state:
-        st.session_state.mapping_df = pd.DataFrame()
-    if "layout_df" not in st.session_state:
-        st.session_state.layout_df = pd.DataFrame()
-    if "generated_docx" not in st.session_state:
-        st.session_state.generated_docx = None
-    if "generated_inventory_xlsx" not in st.session_state:
-        st.session_state.generated_inventory_xlsx = None
-    if "char_limits" not in st.session_state:
-        st.session_state.char_limits = copy.deepcopy(DEFAULT_CHAR_LIMITS)
-
-
 def main():
-    st.set_page_config(page_title="Spreadsheet to LabTAG Label Filler", layout="wide")
+    st.set_page_config(page_title="LabTAG LCS-125WH Label Filler", layout="wide")
     init_state()
     inject_custom_css()
 
-    st.title("Spreadsheet to LabTAG Label Filler")
-    st.caption("Use Excel or CSV for data entry, autofill, copying, and QC. This app maps spreadsheet columns to the Circle and Rectangle parts of the printable LabTAG template.")
+    st.title("LabTAG LCS-125WH Label Filler")
+    st.caption("Uses the Word template as the source of truth and only writes formatted text into label cells.")
 
     with st.sidebar:
         st.header("Template")
-        uploaded_template = st.file_uploader("Upload CryoSTUCK_labels.docx or another compatible .docx template", type=["docx"])
-        use_default = st.checkbox("Use included template if no upload", value=True)
+        uploaded_template = st.file_uploader("Upload official or partially used .docx template", type=["docx"])
+        use_default = st.checkbox("Use included LCS-125WH template", value=True)
         if uploaded_template is not None:
             template_bytes = uploaded_template.read()
             st.success("Using uploaded template.")
         elif use_default and DEFAULT_TEMPLATE.exists():
             template_bytes = DEFAULT_TEMPLATE.read_bytes()
-            st.success(f"Using included template: {DEFAULT_TEMPLATE.name}")
+            st.success("Using included template.")
         else:
             st.error("Upload a .docx template or keep the included template selected.")
             st.stop()
@@ -828,143 +851,74 @@ def main():
                 for error in template_errors:
                     st.error(error)
             existing_occupied = get_existing_occupied_positions(template_bytes)
-            st.caption(f"Detected {len(existing_occupied)} occupied label positions in this template.")
+            st.caption(f"Detected {len(existing_occupied)} occupied label positions in the current template.")
         except Exception as exc:
             st.error(f"Could not read template: {exc}")
             st.stop()
 
-        st.header("Placement")
-        start_sheet = st.number_input("Start sheet", min_value=1, max_value=50, value=1, step=1)
-        start_row = st.number_input("Start row", min_value=1, max_value=20, value=1, step=1)
-        start_col = st.number_input("Start label column", min_value=1, max_value=5, value=1, step=1)
+        st.header("Output behavior")
         skip_occupied = st.checkbox("Skip labels that already contain text", value=True)
-        allow_overwrite = st.checkbox("Allow overwrite if layout targets used labels", value=False)
+        allow_overwrite = st.checkbox("Allow overwrite if edited layout targets used labels", value=False)
         include_box_layout = st.checkbox("Add 10 x 10 box columns to inventory export", value=True)
+        st.caption("If more labels are requested than fit on the existing page, the app adds another blank copy of the template page.")
 
-        st.header("QR codes")
-        add_qr_codes = st.checkbox("Add QR code when uniqueID is present", value=True)
-        qr_size_inches = st.number_input("QR size in rectangle, inches", min_value=0.10, max_value=0.25, value=DEFAULT_QR_SIZE_INCHES, step=0.01, help="Small labels need tiny QR codes. Test scan before using for a real experiment.")
-        if add_qr_codes and qrcode is None:
-            st.error("QR code support requires the qrcode package. Add qrcode[pil] to requirements.txt.")
+    st.subheader("1. Build label ID sets")
+    top_cols = st.columns([1, 1, 2])
+    with top_cols[0]:
+        if st.button("Add another Label ID Set", type="secondary"):
+            previous = copy.deepcopy(st.session_state.label_sets[-1])
+            previous["name"] = f"Set {len(st.session_state.label_sets) + 1}"
+            next_sheet, next_row, next_col = first_available_position(st.session_state.label_sets, existing_occupied, skip_occupied)
+            previous["start_sheet"] = next_sheet
+            previous["start_row"] = next_row
+            previous["start_col"] = next_col
+            st.session_state.label_sets.append(previous)
+            st.rerun()
+    with top_cols[1]:
+        if len(st.session_state.label_sets) > 1 and st.button("Remove last set"):
+            st.session_state.label_sets.pop()
+            st.rerun()
 
-        st.header("Text length checks")
-        uploaded_limits = st.file_uploader("Optional JSON character limit config", type=["json"], help="Optional. Use this to tune max character warnings by label part and font size.")
-        st.session_state.char_limits = load_char_limit_config(uploaded_limits)
-        st.caption("Character limits are warnings only. They do not block printing.")
+    for set_idx, label_set in enumerate(st.session_state.label_sets):
+        with st.expander(f"Label ID Set {set_idx + 1}: {label_set.get('name', '')}", expanded=True):
+            c1, c2, c3, c4, c5 = st.columns(5)
+            with c1:
+                label_set["name"] = st.text_input("Set name", value=label_set.get("name", f"Set {set_idx + 1}"), key=f"set_name_{set_idx}")
+            with c2:
+                label_set["start_sheet"] = st.number_input("Start sheet", min_value=1, max_value=50, value=int(label_set.get("start_sheet", 1)), step=1, key=f"set_sheet_{set_idx}")
+            with c3:
+                label_set["start_row"] = st.number_input("Start row", min_value=1, max_value=20, value=int(label_set.get("start_row", 1)), step=1, key=f"set_row_{set_idx}")
+            with c4:
+                label_set["start_col"] = st.number_input("Start label column", min_value=1, max_value=5, value=int(label_set.get("start_col", 1)), step=1, key=f"set_col_{set_idx}")
+            with c5:
+                label_set["count"] = st.number_input("Labels to fill", min_value=1, max_value=1000, value=int(label_set.get("count", 20)), step=1, key=f"set_count_{set_idx}")
 
-    st.subheader("1. Upload Excel or CSV input")
-    st.download_button(
-        label="Download blank Excel input template",
-        data=build_input_template_excel_bytes(),
-        file_name="label_input_template.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        help="Download a starter spreadsheet with the recommended column names and example values.",
-    )
-    uploaded_data = st.file_uploader("Upload label data", type=["xlsx", "csv"])
-    if uploaded_data is None:
-        st.info("Download the starter Excel template above or upload your own Excel/CSV file. By default, the first 3 data columns become Circle lines and the next columns become Rectangle lines.")
-        st.stop()
+            st.caption("Choose which part of the label to edit below.")
+            ltab, rtab = st.tabs(["● Circle formatting", "▰ Rectangle formatting"])
+            with ltab:
+                label_set["circle_lines"] = line_editor(f"set{set_idx}_circle", "Circle", label_set.get("circle_lines", default_lines("circle")), max_lines=MAX_CIRCLE_LINES)
+            with rtab:
+                label_set["rectangle_lines"] = line_editor(f"set{set_idx}_rectangle", "Rectangle", label_set.get("rectangle_lines", default_lines("rectangle")), max_lines=MAX_RECTANGLE_LINES, recommended_lines=RECOMMENDED_RECTANGLE_LINES)
 
-    try:
-        input_df = read_input_table(uploaded_data)
-    except Exception as exc:
-        st.error(f"Could not read input file: {exc}")
-        st.stop()
-
-    if input_df.empty:
-        st.error("The uploaded file does not contain any usable rows.")
-        st.stop()
-
-    st.dataframe(input_df.head(25), use_container_width=True)
-    st.caption(f"Loaded {len(input_df)} rows and {len(input_df.columns)} columns.")
-
-    st.subheader("2. Confirm set ID and column mapping")
-    setid_candidates = [""] + list(input_df.columns)
-    default_setid_index = 0
-    for idx, col in enumerate(setid_candidates):
-        if str(col).strip().lower() in ["setid", "set_id", "set id"]:
-            default_setid_index = idx
-            break
-    setid_col = st.selectbox("Optional setID column", options=setid_candidates, index=default_setid_index, help="Use this if rows belong to groups like Liver, Brain, DNA, RNA, etc. It is also included in the inventory export.")
-    setid_col = setid_col or None
-
-    unique_candidates = [""] + list(input_df.columns)
-    default_unique_index = 0
-    for idx, col in enumerate(unique_candidates):
-        if normalize_column_name(col) in ["uniqueid", "unique_id", "uid", "qr", "qr_code"]:
-            default_unique_index = idx
-            break
-    unique_id_col = st.selectbox("Optional uniqueID column for QR codes", options=unique_candidates, index=default_unique_index, help="If selected and QR is enabled, non-empty values become QR codes in the bottom-right area of the rectangle.")
-    unique_id_col = unique_id_col or None
-
-    ignore_cols_for_mapping = [c for c in [setid_col, unique_id_col] if c]
-    if st.session_state.mapping_df.empty or set(st.session_state.mapping_df.get("source_column", [])) != set([c for c in input_df.columns if c not in ignore_cols_for_mapping]):
-        st.session_state.mapping_df = default_mapping_for_columns([c for c in input_df.columns if c != unique_id_col], setid_col)
-
-    tab_global, tab_setid = st.tabs(["Column mapping and formatting", "Set ID notes"])
-    with tab_global:
-        st.caption("For tabbed lines, map one column to Left/new line and another column to Right/tab on same line using the same Circle/Rectangle line number.")
-        edited_mapping = st.data_editor(
-            st.session_state.mapping_df,
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            column_config={
-                "source_column": st.column_config.TextColumn("Excel/CSV column", disabled=True),
-                "print_part": st.column_config.SelectboxColumn("Label part", options=PRINT_PARTS),
-                "line": st.column_config.NumberColumn("Line", min_value=1, max_value=MAX_RECTANGLE_LINES, step=1),
-                "side": st.column_config.SelectboxColumn("Line or tab", options=SIDES),
-                "font_size": st.column_config.NumberColumn("Font", min_value=MIN_FONT_SIZE, max_value=MAX_FONT_SIZE, step=0.5),
-                "bold": st.column_config.CheckboxColumn("Bold"),
-                "align": st.column_config.SelectboxColumn("Align", options=DISPLAY_ALIGNMENTS),
-                "color": st.column_config.TextColumn("HEX color"),
-                "tab_pos": st.column_config.NumberColumn("Tab pos", min_value=300, max_value=2200, step=50),
-            },
-            disabled=["source_column"],
-            key="spreadsheet_mapping_editor",
-        )
-        st.session_state.mapping_df = normalize_mapping(edited_mapping)
-        map_warns = mapping_warnings(st.session_state.mapping_df)
-        for warning in map_warns:
-            st.warning(warning)
-        st.caption("Circle can use lines 1 to 3. Rectangle can use lines 1 to 6. Line spacing in the DOCX output is fixed at 0.75.")
-
-    with tab_setid:
-        if setid_col:
-            detected = input_df[setid_col].dropna().astype(str).unique().tolist()
-            st.write("Detected set IDs:", ", ".join(detected[:30]) if detected else "none")
-            st.caption("This version uses one formatting map for all rows. The setID column travels with the preview and inventory export. A future patch can add separate formatting overrides per setID if you still need that after testing this simpler workflow.")
-        else:
-            st.caption("No setID column selected. You can add a column named setID in Excel if you want labels grouped by collection type or experiment subset.")
-        if unique_id_col:
-            st.caption(f"QR source column: {unique_id_col}. Blank values will not get a QR code.")
-        else:
-            st.caption("No uniqueID column selected. Add a column named uniqueID if you want automatic QR codes.")
-
-    st.subheader("3. Build preview")
-    if st.button("Build printable layout", type="primary"):
-        try:
-            st.session_state.layout_df = build_labels_from_input(
-                input_df,
-                st.session_state.mapping_df,
-                setid_col,
-                unique_id_col,
-                existing_occupied,
-                skip_occupied,
-                int(start_sheet),
-                int(start_row),
-                int(start_col),
-            )
-            st.session_state.generated_docx = None
-            st.session_state.generated_inventory_xlsx = None
-            st.success("Printable layout generated.")
-        except Exception as exc:
-            st.error(str(exc))
+    st.divider()
+    st.subheader("2. Build editable layout and preview")
+    cbuild, cclear = st.columns([1, 3])
+    with cbuild:
+        if st.button("Build editable layout", type="primary"):
+            try:
+                st.session_state.layout_df = build_layout(st.session_state.label_sets, existing_occupied, skip_occupied)
+                st.session_state.generated_docx = None
+                st.session_state.generated_inventory_xlsx = None
+                st.success("Editable layout generated.")
+            except Exception as exc:
+                st.error(str(exc))
+    with cclear:
+        st.caption("This creates the serialized rows first. Then you can manually move labels by editing Sheet, Row, and Label column, or fine tune the generated text JSON fields.")
 
     if not st.session_state.layout_df.empty:
-        tab_preview, tab_grid, tab_advanced = st.tabs(["Editable layout", "Sheet map", "Advanced line data"])
+        tab_preview, tab_grid, tab_advanced = st.tabs(["Editable layout", "Sheet map", "Advanced text editing"])
         with tab_preview:
-            display_cols = ["Use", "Input row", "Set ID", "Unique ID", "Sheet", "Row", "Label column", "Circle text", "Rectangle text"]
+            display_cols = ["Use", "Global #", "Set name", "Within set #", "Sheet", "Row", "Label column", "Circle text", "Rectangle text"]
             edited_display = st.data_editor(
                 st.session_state.layout_df[display_cols],
                 use_container_width=True,
@@ -976,11 +930,12 @@ def main():
                     "Row": st.column_config.NumberColumn("Row", min_value=1, max_value=20, step=1),
                     "Label column": st.column_config.NumberColumn("Label column", min_value=1, max_value=5, step=1),
                 },
-                disabled=["Input row", "Set ID", "Unique ID", "Circle text", "Rectangle text"],
+                disabled=["Global #", "Set name", "Within set #", "Circle text", "Rectangle text"],
                 key="layout_display_editor",
             )
             for col in ["Use", "Sheet", "Row", "Label column"]:
                 st.session_state.layout_df[col] = edited_display[col]
+
             warnings = layout_warnings(st.session_state.layout_df, existing_occupied)
             if warnings:
                 for warning in warnings:
@@ -990,36 +945,35 @@ def main():
                         st.warning(warning)
             else:
                 st.success("No layout conflicts detected.")
-            char_warnings = character_fit_warnings(st.session_state.layout_df, st.session_state.char_limits)
-            if char_warnings:
-                with st.expander(f"Text length warnings ({len(char_warnings)})", expanded=False):
-                    for warning in char_warnings[:100]:
-                        st.warning(warning)
-                    if len(char_warnings) > 100:
-                        st.caption("Only the first 100 warnings are shown.")
 
         with tab_grid:
             st.markdown(layout_grid_html(st.session_state.layout_df, existing_occupied), unsafe_allow_html=True)
             st.caption("Blue means planned labels. Red means existing text from the uploaded template. Orange means a conflict or duplicate.")
 
         with tab_advanced:
-            st.caption("Advanced. You usually do not need to edit this. It stores the actual line formatting sent to Word.")
-            json_cols = ["Input row", "Circle lines JSON", "Rectangle lines JSON"]
+            st.caption("The display preview is not enough to preserve line-level formatting. Edit these JSON lists only when you need to fine tune the final text after serialization.")
+            hidden_cols = ["Global #", "Circle left JSON", "Circle right JSON", "Rectangle left JSON", "Rectangle right JSON"]
             edited_json = st.data_editor(
-                st.session_state.layout_df[json_cols],
+                st.session_state.layout_df[hidden_cols],
                 use_container_width=True,
                 hide_index=True,
                 num_rows="fixed",
-                disabled=["Input row"],
+                disabled=["Global #"],
                 key="json_layout_editor",
             )
-            for col in ["Circle lines JSON", "Rectangle lines JSON"]:
+            for col in hidden_cols[1:]:
                 st.session_state.layout_df[col] = edited_json[col]
 
-        st.subheader("4. Generate files")
+        st.divider()
+        st.subheader("3. Generate files")
         if st.button("Generate filled DOCX and inventory table", type="primary"):
             try:
-                output_bytes = fill_from_layout(template_bytes, st.session_state.layout_df, allow_overwrite, add_qr_codes=add_qr_codes, qr_size_inches=float(qr_size_inches))
+                output_bytes = fill_from_layout(
+                    template_bytes=template_bytes,
+                    label_sets=copy.deepcopy(st.session_state.label_sets),
+                    layout_df=st.session_state.layout_df,
+                    allow_overwrite=allow_overwrite,
+                )
                 inventory_df = build_inventory_table(st.session_state.layout_df, include_box_layout=include_box_layout)
                 inventory_bytes = inventory_table_to_excel_bytes(inventory_df)
                 st.session_state.generated_docx = output_bytes
@@ -1044,6 +998,8 @@ def main():
                     file_name="inventory_style_table.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
+    else:
+        st.info("Add one or more label sets, then click Build editable layout.")
 
 
 if __name__ == "__main__":
