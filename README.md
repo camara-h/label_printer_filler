@@ -43,3 +43,20 @@ A starter file is included as `character_limits_example.json`.
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+## Downloadable input template
+
+The app includes a **Download blank Excel input template** button before data upload. The starter columns are:
+
+- `CircleLine1`
+- `CircleLine2MainInfo`
+- `CircleLine3`
+- `RectangleLine1MainInfo`
+- `RectangleLine2`
+- `RectangleLine3`
+- `RectangleLine4`
+- `RectangleLine5`
+- `SetID`
+- `UniqueID`
+
+The default mapping is name-aware. `CircleLine2MainInfo` and `RectangleLine1MainInfo` are mapped as the bold main-information lines. `SetID` and `UniqueID` are detected separately and are not printed as regular label text unless you manually map them.

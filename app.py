@@ -326,6 +326,79 @@ def write_cell_from_lines(cell, lines: List[Dict[str, Any]], qr_text: str = "", 
             run.add_picture(qr_image, width=Inches(float(qr_size_inches)))
 
 
+def build_input_template_excel_bytes() -> bytes:
+    """Create a starter Excel file that users can download and fill in."""
+    columns = [
+        "CircleLine1",
+        "CircleLine2MainInfo",
+        "CircleLine3",
+        "RectangleLine1MainInfo",
+        "RectangleLine2",
+        "RectangleLine3",
+        "RectangleLine4",
+        "RectangleLine5",
+        "SetID",
+        "UniqueID",
+    ]
+    example_rows = [
+        [
+            "ELN:",
+            "Main Info 1",
+            "(Optional) Secondary info",
+            "Main Info 1",
+            "Detailed Info: concentration / solvent / condition",
+            "Storage Info",
+            "Expiration Date",
+            "ELN: DD/MM/YYYY",
+            "ExampleSet",
+            "IT000001",
+        ],
+        [
+            "ELN:",
+            "Main Info 2",
+            "(Optional) Secondary info",
+            "Main Info 2",
+            "Detailed Info: concentration / solvent / condition",
+            "Storage Info",
+            "Expiration Date",
+            "ELN: DD/MM/YYYY",
+            "ExampleSet",
+            "IT000002",
+        ],
+    ]
+    df = pd.DataFrame(example_rows, columns=columns)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Labels")
+        ws = writer.sheets["Labels"]
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        widths = {
+            "A": 16, "B": 20, "C": 24, "D": 24, "E": 42,
+            "F": 22, "G": 22, "H": 22, "I": 16, "J": 16,
+        }
+        for col_letter, width in widths.items():
+            ws.column_dimensions[col_letter].width = width
+        for cell in ws[1]:
+            cell.font = cell.font.copy(bold=True)
+        note_sheet = writer.book.create_sheet("Instructions")
+        note_rows = [
+            ["How to use this template"],
+            ["Fill one row per label. Keep column names unchanged for easiest mapping."],
+            ["CircleLine1, CircleLine2MainInfo, CircleLine3 become the three circle lines."],
+            ["RectangleLine1MainInfo and RectangleLine2-5 become rectangle lines."],
+            ["SetID is optional and can group labels by collection type, experiment, or batch."],
+            ["UniqueID is optional. If filled and QR/barcode output is enabled, it can be encoded on the label."],
+            ["Non-main info can be left blank. Examples marked (Optional) are placeholders only."],
+        ]
+        for r, values in enumerate(note_rows, start=1):
+            for c, value in enumerate(values, start=1):
+                note_sheet.cell(row=r, column=c).value = value
+        note_sheet.column_dimensions["A"].width = 100
+    output.seek(0)
+    return output.getvalue()
+
+
 def read_input_table(uploaded_file) -> pd.DataFrame:
     name = uploaded_file.name.lower()
     if name.endswith(".csv"):
@@ -352,8 +425,31 @@ def default_mapping_for_columns(columns: List[str], setid_col: Optional[str] = N
     printable_cols = [c for c in columns if c != setid_col]
     position_names = {"sheet", "print_sheet", "row", "print_row", "column", "label_column", "print_column"}
     printable_cols = [c for c in printable_cols if str(c).strip().lower().replace(" ", "_") not in position_names]
+
+    # Preferred defaults for the downloadable spreadsheet template.
+    # These are intentionally name-aware so the template maps correctly even if
+    # users rearrange the columns in Excel.
+    named_defaults = {
+        "circleline1": {"part": "Circle", "line": 1, "align": "Center", "font_size": 5.0, "bold": False},
+        "circleline2maininfo": {"part": "Circle", "line": 2, "align": "Center", "font_size": 7.0, "bold": True},
+        "circleline3": {"part": "Circle", "line": 3, "align": "Center", "font_size": 5.0, "bold": False},
+        "rectangleline1maininfo": {"part": "Rectangle", "line": 1, "align": "Left", "font_size": 7.0, "bold": True},
+        "rectangleline2": {"part": "Rectangle", "line": 2, "align": "Left", "font_size": 6.0, "bold": False},
+        "rectangleline3": {"part": "Rectangle", "line": 3, "align": "Left", "font_size": 6.0, "bold": False},
+        "rectangleline4": {"part": "Rectangle", "line": 4, "align": "Left", "font_size": 6.0, "bold": False},
+        "rectangleline5": {"part": "Rectangle", "line": 5, "align": "Left", "font_size": 6.0, "bold": False},
+    }
+
     for idx, col in enumerate(printable_cols):
-        if idx < MAX_CIRCLE_LINES:
+        norm = normalize_column_name(col).replace("_", "")
+        if norm in named_defaults:
+            cfg = named_defaults[norm]
+            part = cfg["part"]
+            line = cfg["line"]
+            align = cfg["align"]
+            font_size = cfg["font_size"]
+            bold = cfg["bold"]
+        elif idx < MAX_CIRCLE_LINES:
             part = "Circle"
             line = idx + 1
             align = "Center"
@@ -757,9 +853,16 @@ def main():
         st.caption("Character limits are warnings only. They do not block printing.")
 
     st.subheader("1. Upload Excel or CSV input")
+    st.download_button(
+        label="Download blank Excel input template",
+        data=build_input_template_excel_bytes(),
+        file_name="label_input_template.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        help="Download a starter spreadsheet with the recommended column names and example values.",
+    )
     uploaded_data = st.file_uploader("Upload label data", type=["xlsx", "csv"])
     if uploaded_data is None:
-        st.info("Upload an Excel or CSV file. By default, the first 3 data columns become Circle lines and the next columns become Rectangle lines.")
+        st.info("Download the starter Excel template above or upload your own Excel/CSV file. By default, the first 3 data columns become Circle lines and the next columns become Rectangle lines.")
         st.stop()
 
     try:
