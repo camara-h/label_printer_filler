@@ -34,9 +34,13 @@ LABEL_LINE_SPACING_MULTIPLE = 0.75
 LABEL_LINE_SPACING_TWIPS = int(240 * LABEL_LINE_SPACING_MULTIPLE)
 MIN_FONT_SIZE = 4.0
 MAX_FONT_SIZE = 7.0
-MAX_CIRCLE_LINES = 3
+MAX_CIRCLE_LINES = 2
 MAX_RECTANGLE_LINES = 6
 DEFAULT_QR_SIZE_INCHES = 0.16
+DEFAULT_RECTANGLE_QR_SIZE_INCHES = 0.16
+DEFAULT_CIRCLE_QR_SMALL_INCHES = 0.15
+DEFAULT_CIRCLE_QR_MAIN_INCHES = 0.20
+DEFAULT_MAX_QR_PAYLOAD_CHARS = 60
 
 DEFAULT_CHAR_LIMITS = {
     "Circle": {"7": 8, "6": 10, "5": 13, "4": 16},
@@ -107,6 +111,84 @@ def load_char_limit_config(uploaded_json=None) -> Dict[str, Dict[str, int]]:
 def printable_length(text: str) -> int:
     return len(str(text or "").replace("\t", " ").replace("\n", " "))
 
+
+
+
+def line_text_for_qr(line: Dict[str, Any]) -> str:
+    """Return one clean text value from a formatted label line for QR payloads."""
+    left = str(line.get("left_text", "")).strip()
+    right = str(line.get("right_text", "")).strip()
+    return "	".join([part for part in [left, right] if part]).strip()
+
+
+def truncate_qr_payload(parts: List[str], max_chars: int, separator: str = "	") -> str:
+    """Join non-empty parts and cap total QR payload length.
+
+    Keeps earlier fields first. UniqueID should be passed as the first part, so it is prioritized.
+    """
+    max_chars = max(1, int(max_chars or DEFAULT_MAX_QR_PAYLOAD_CHARS))
+    cleaned = []
+    for part in parts:
+        text = re.sub(r"[\r\n\t]+", " ", str(part or "")).strip()
+        text = re.sub(r"\s+", " ", text)
+        if text:
+            cleaned.append(text)
+    if not cleaned:
+        return ""
+
+    payload = ""
+    for part in cleaned:
+        candidate = part if not payload else payload + separator + part
+        if len(candidate) <= max_chars:
+            payload = candidate
+            continue
+        remaining = max_chars - len(payload) - (len(separator) if payload else 0)
+        if remaining > 0:
+            payload = (payload + separator if payload else "") + part[:remaining].rstrip()
+        break
+    return payload[:max_chars].strip()
+
+
+def build_qr_payload_from_layout_row(layout_row, max_chars: int) -> str:
+    """Build a capped QR payload from available label information.
+
+    Priority order:
+    1) Unique ID, when present
+    2) Circle line 2 main info
+    3) Circle line 1
+    4) Rectangle line 1 main info
+    5) Remaining rectangle lines, in order
+
+    UniqueID is the safest database identifier and is always placed first when available,
+    but it is not required. If no UniqueID exists, descriptive label text is encoded instead.
+    """
+    unique_id = str(layout_row.get("Unique ID", "")).strip()
+    circle_lines = parse_lines_repr(layout_row.get("Circle lines JSON", "[]"))
+    rect_lines = parse_lines_repr(layout_row.get("Rectangle lines JSON", "[]"))
+
+    def find_line(lines, line_num):
+        for line in lines:
+            try:
+                if int(line.get("line_num", 0)) == int(line_num):
+                    return line_text_for_qr(line)
+            except Exception:
+                continue
+        return ""
+
+    parts = [
+        unique_id,
+        find_line(circle_lines, 2),
+        find_line(circle_lines, 1),
+        find_line(rect_lines, 1),
+    ]
+    for line in sorted(rect_lines, key=lambda x: int(x.get("line_num", 999))):
+        try:
+            if int(line.get("line_num", 0)) <= 1:
+                continue
+        except Exception:
+            pass
+        parts.append(line_text_for_qr(line))
+    return truncate_qr_payload(parts, max_chars=max_chars, separator="	")
 
 def make_qr_image_bytes(value: str) -> Optional[io.BytesIO]:
     if not value or qrcode is None:
@@ -288,16 +370,27 @@ def box_position(index_zero_based: int) -> Tuple[int, int, str]:
     return box_col, box_row, f"{box_col}{row_letter}"
 
 
-def write_cell_from_lines(cell, lines: List[Dict[str, Any]], qr_text: str = "", qr_size_inches: float = DEFAULT_QR_SIZE_INCHES):
-    clear_cell(cell)
-    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-    set_cell_padding(cell, top="0", start="20", bottom="0", end="20")
-    if not lines and not qr_text:
-        cell.add_paragraph("")
+def _line_has_text(line: Dict[str, Any]) -> bool:
+    return bool(str(line.get("left_text", "")).strip() or str(line.get("right_text", "")).strip())
+
+
+def add_qr_paragraph(cell, qr_text: str, qr_size_inches: float, alignment=WD_ALIGN_PARAGRAPH.CENTER):
+    qr_image = make_qr_image_bytes(str(qr_text).strip())
+    if qr_image is None:
         return
+    paragraph = cell.add_paragraph()
+    paragraph.alignment = alignment
+    set_line_spacing(paragraph)
+    run = paragraph.add_run()
+    run.add_picture(qr_image, width=Inches(float(qr_size_inches)))
+
+
+def write_text_lines(cell, lines: List[Dict[str, Any]], default_alignment: str = "Center"):
     for line in lines:
+        if not _line_has_text(line):
+            continue
         paragraph = cell.add_paragraph()
-        paragraph.alignment = ALIGNMENTS.get(line.get("align", "Center"), WD_ALIGN_PARAGRAPH.CENTER)
+        paragraph.alignment = ALIGNMENTS.get(line.get("align", default_alignment), ALIGNMENTS.get(default_alignment, WD_ALIGN_PARAGRAPH.CENTER))
         set_line_spacing(paragraph)
         add_formatted_run(
             paragraph,
@@ -316,14 +409,49 @@ def write_cell_from_lines(cell, lines: List[Dict[str, Any]], qr_text: str = "", 
                 line.get("bold", False),
                 line.get("color", "#000000"),
             )
+
+
+def write_cell_from_lines(cell, lines: List[Dict[str, Any]], qr_text: str = "", qr_size_inches: float = DEFAULT_RECTANGLE_QR_SIZE_INCHES):
+    clear_cell(cell)
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    set_cell_padding(cell, top="0", start="20", bottom="0", end="20")
+    if not lines and not qr_text:
+        cell.add_paragraph("")
+        return
+    write_text_lines(cell, lines, default_alignment="Left")
     if qr_text:
-        qr_image = make_qr_image_bytes(str(qr_text).strip())
-        if qr_image is not None:
-            paragraph = cell.add_paragraph()
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-            set_line_spacing(paragraph)
-            run = paragraph.add_run()
-            run.add_picture(qr_image, width=Inches(float(qr_size_inches)))
+        add_qr_paragraph(cell, qr_text, qr_size_inches, alignment=WD_ALIGN_PARAGRAPH.RIGHT)
+
+
+def write_circle_cell_from_lines(
+    cell,
+    lines: List[Dict[str, Any]],
+    qr_text: str = "",
+    add_circle_qr: bool = False,
+    small_qr_size_inches: float = DEFAULT_CIRCLE_QR_SMALL_INCHES,
+    main_qr_size_inches: float = DEFAULT_CIRCLE_QR_MAIN_INCHES,
+):
+    clear_cell(cell)
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    set_cell_padding(cell, top="0", start="10", bottom="0", end="10")
+    text_lines = [line for line in lines if _line_has_text(line)][:MAX_CIRCLE_LINES]
+    has_second_line = any(int(line.get("line_num", idx + 1)) == 2 and _line_has_text(line) for idx, line in enumerate(text_lines))
+
+    if add_circle_qr and qr_text:
+        if has_second_line:
+            # If the lid already has two text lines, keep the QR very small and place it first.
+            add_qr_paragraph(cell, qr_text, small_qr_size_inches, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+            write_text_lines(cell, text_lines, default_alignment="Center")
+        else:
+            # If there is no second lid text line, use that space for a larger QR code.
+            write_text_lines(cell, text_lines, default_alignment="Center")
+            add_qr_paragraph(cell, qr_text, main_qr_size_inches, alignment=WD_ALIGN_PARAGRAPH.CENTER)
+        return
+
+    if text_lines:
+        write_text_lines(cell, text_lines, default_alignment="Center")
+    else:
+        cell.add_paragraph("")
 
 
 def build_input_template_excel_bytes() -> bytes:
@@ -331,7 +459,6 @@ def build_input_template_excel_bytes() -> bytes:
     columns = [
         "CircleLine1",
         "CircleLine2MainInfo",
-        "CircleLine3",
         "RectangleLine1MainInfo",
         "RectangleLine2",
         "RectangleLine3",
@@ -344,7 +471,6 @@ def build_input_template_excel_bytes() -> bytes:
         [
             "ELN:",
             "Main Info 1",
-            "(Optional) Secondary info",
             "Main Info 1",
             "Detailed Info: concentration / solvent / condition",
             "Storage Info",
@@ -356,7 +482,6 @@ def build_input_template_excel_bytes() -> bytes:
         [
             "ELN:",
             "Main Info 2",
-            "(Optional) Secondary info",
             "Main Info 2",
             "Detailed Info: concentration / solvent / condition",
             "Storage Info",
@@ -374,8 +499,8 @@ def build_input_template_excel_bytes() -> bytes:
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         widths = {
-            "A": 16, "B": 20, "C": 24, "D": 24, "E": 42,
-            "F": 22, "G": 22, "H": 22, "I": 16, "J": 16,
+            "A": 16, "B": 20, "C": 24, "D": 42, "E": 22,
+            "F": 22, "G": 22, "H": 16, "I": 16,
         }
         for col_letter, width in widths.items():
             ws.column_dimensions[col_letter].width = width
@@ -385,10 +510,10 @@ def build_input_template_excel_bytes() -> bytes:
         note_rows = [
             ["How to use this template"],
             ["Fill one row per label. Keep column names unchanged for easiest mapping."],
-            ["CircleLine1, CircleLine2MainInfo, CircleLine3 become the three circle lines."],
+            ["CircleLine1 and CircleLine2MainInfo become the two circle/lid text lines."],
             ["RectangleLine1MainInfo and RectangleLine2-5 become rectangle lines."],
             ["SetID is optional and can group labels by collection type, experiment, or batch."],
-            ["UniqueID is optional. If filled and QR/barcode output is enabled, it can be encoded on the label."],
+            ["UniqueID is optional. When provided, it is always encoded first because it is the safest database identifier. If it is absent, QR output can still encode descriptive label information up to the configured character limit."],
             ["Non-main info can be left blank. Examples marked (Optional) are placeholders only."],
         ]
         for r, values in enumerate(note_rows, start=1):
@@ -432,7 +557,7 @@ def default_mapping_for_columns(columns: List[str], setid_col: Optional[str] = N
     named_defaults = {
         "circleline1": {"part": "Circle", "line": 1, "align": "Center", "font_size": 5.0, "bold": False},
         "circleline2maininfo": {"part": "Circle", "line": 2, "align": "Center", "font_size": 7.0, "bold": True},
-        "circleline3": {"part": "Circle", "line": 3, "align": "Center", "font_size": 5.0, "bold": False},
+        "circleline3": {"part": "Ignore", "line": 1, "align": "Center", "font_size": 5.0, "bold": False},
         "rectangleline1maininfo": {"part": "Rectangle", "line": 1, "align": "Left", "font_size": 7.0, "bold": True},
         "rectangleline2": {"part": "Rectangle", "line": 2, "align": "Left", "font_size": 6.0, "bold": False},
         "rectangleline3": {"part": "Rectangle", "line": 3, "align": "Left", "font_size": 6.0, "bold": False},
@@ -507,7 +632,7 @@ def mapping_warnings(mapping_df: pd.DataFrame) -> List[str]:
     circle_lines = set(active.loc[active["print_part"] == "Circle", "line"].astype(int).tolist())
     rect_lines = set(active.loc[active["print_part"] == "Rectangle", "line"].astype(int).tolist())
     if any(line < 1 or line > MAX_CIRCLE_LINES for line in circle_lines):
-        warnings.append("Circle lines must be 1 to 3. Columns mapped outside that range will not be written correctly.")
+        warnings.append("Circle lines must be 1 to 2. Columns mapped outside that range will not be written correctly.")
     if any(line < 1 or line > MAX_RECTANGLE_LINES for line in rect_lines):
         warnings.append("Rectangle lines must be 1 to 6. Columns mapped outside that range will not be written correctly.")
     for part, max_lines in [("Circle", MAX_CIRCLE_LINES), ("Rectangle", MAX_RECTANGLE_LINES)]:
@@ -539,6 +664,7 @@ def build_label_lines_for_row(row: pd.Series, mapping_df: pd.DataFrame, part: st
         if not left_text and not right_text:
             continue
         lines.append({
+            "line_num": int(line_num),
             "left_text": left_text,
             "right_text": right_text,
             "font_size": float(style_source.get("font_size", 6.0)),
@@ -646,7 +772,17 @@ def character_fit_warnings(layout_df: pd.DataFrame, char_limits: Dict[str, Dict[
                     warnings.append(f"{label_pos}: {part} line {line_idx} has about {length} characters at font {size_key}; suggested max is {limit}.")
     return warnings
 
-def fill_from_layout(template_bytes: bytes, layout_df: pd.DataFrame, allow_overwrite: bool, add_qr_codes: bool = False, qr_size_inches: float = DEFAULT_QR_SIZE_INCHES) -> bytes:
+def fill_from_layout(
+    template_bytes: bytes,
+    layout_df: pd.DataFrame,
+    allow_overwrite: bool,
+    add_qr_codes: bool = False,
+    rectangle_qr_size_inches: float = DEFAULT_RECTANGLE_QR_SIZE_INCHES,
+    add_circle_qr_codes: bool = True,
+    circle_qr_small_inches: float = DEFAULT_CIRCLE_QR_SMALL_INCHES,
+    circle_qr_main_inches: float = DEFAULT_CIRCLE_QR_MAIN_INCHES,
+    max_qr_payload_chars: int = DEFAULT_MAX_QR_PAYLOAD_CHARS,
+) -> bytes:
     doc = Document(io.BytesIO(template_bytes))
     errors = validate_template(doc)
     if errors:
@@ -670,15 +806,22 @@ def fill_from_layout(template_bytes: bytes, layout_df: pd.DataFrame, allow_overw
         label_col = int(layout_row["Label column"])
         circle_lines = parse_lines_repr(layout_row.get("Circle lines JSON", "[]"))
         rect_lines = parse_lines_repr(layout_row.get("Rectangle lines JSON", "[]"))
-        unique_id = str(layout_row.get("Unique ID", "")).strip()
+        qr_payload = build_qr_payload_from_layout_row(layout_row, max_qr_payload_chars) if add_qr_codes else ""
         table = doc.tables[sheet - 1]
         circle_col, rectangle_col = label_to_table_columns(label_col)
-        write_cell_from_lines(table.cell(row_num - 1, circle_col), circle_lines)
+        write_circle_cell_from_lines(
+            table.cell(row_num - 1, circle_col),
+            circle_lines,
+            qr_text=qr_payload if add_qr_codes and add_circle_qr_codes and qr_payload else "",
+            add_circle_qr=bool(add_qr_codes and add_circle_qr_codes and qr_payload),
+            small_qr_size_inches=circle_qr_small_inches,
+            main_qr_size_inches=circle_qr_main_inches,
+        )
         write_cell_from_lines(
             table.cell(row_num - 1, rectangle_col),
             rect_lines,
-            qr_text=unique_id if add_qr_codes and unique_id else "",
-            qr_size_inches=qr_size_inches,
+            qr_text=qr_payload if add_qr_codes and qr_payload else "",
+            qr_size_inches=rectangle_qr_size_inches,
         )
     output = io.BytesIO()
     doc.save(output)
@@ -842,8 +985,13 @@ def main():
         include_box_layout = st.checkbox("Add 10 x 10 box columns to inventory export", value=True)
 
         st.header("QR codes")
-        add_qr_codes = st.checkbox("Add QR code when uniqueID is present", value=True)
-        qr_size_inches = st.number_input("QR size in rectangle, inches", min_value=0.10, max_value=0.25, value=DEFAULT_QR_SIZE_INCHES, step=0.01, help="Small labels need tiny QR codes. Test scan before using for a real experiment.")
+        add_qr_codes = st.checkbox("Create QR code", value=True)
+        add_circle_qr_codes = st.checkbox("Also add QR code to circle/lid", value=True, help="If enabled, the same capped QR payload is also added to the lid. If circle line 2 is blank, the QR can be larger.")
+        max_qr_payload_chars = st.number_input("Maximum characters encoded in each QR", min_value=8, max_value=200, value=DEFAULT_MAX_QR_PAYLOAD_CHARS, step=5, help="The QR uses available label information up to this limit. UniqueID is always placed first when present, followed by CircleLine2MainInfo, CircleLine1, RectangleLine1MainInfo, and remaining rectangle lines. Extra text is truncated.")
+        st.caption("QR payload order: UniqueID (when present) → CircleLine2MainInfo → CircleLine1 → RectangleLine1MainInfo → remaining rectangle lines. Blank fields are skipped. If UniqueID is absent, the QR still uses the available sample information. Long payloads are truncated.")
+        rectangle_qr_size_inches = st.number_input("QR size in rectangle, inches", min_value=0.10, max_value=0.25, value=DEFAULT_RECTANGLE_QR_SIZE_INCHES, step=0.01, help="Small labels need tiny QR codes. Test scan before using for a real experiment.")
+        circle_qr_small_inches = st.number_input("Circle QR size when two lid text lines are present", min_value=0.10, max_value=0.20, value=DEFAULT_CIRCLE_QR_SMALL_INCHES, step=0.01, help="Used when the circle already has text in line 2.")
+        circle_qr_main_inches = st.number_input("Circle QR size when circle line 2 is blank", min_value=0.10, max_value=0.25, value=DEFAULT_CIRCLE_QR_MAIN_INCHES, step=0.01, help="Used when there is no circle line 2 text, so the QR can use more lid space.")
         if add_qr_codes and qrcode is None:
             st.error("QR code support requires the qrcode package. Add qrcode[pil] to requirements.txt.")
 
@@ -862,7 +1010,7 @@ def main():
     )
     uploaded_data = st.file_uploader("Upload label data", type=["xlsx", "csv"])
     if uploaded_data is None:
-        st.info("Download the starter Excel template above or upload your own Excel/CSV file. By default, the first 3 data columns become Circle lines and the next columns become Rectangle lines.")
+        st.info("Download the starter Excel template above or upload your own Excel/CSV file. By default, the first 2 data columns become Circle lines and the next columns become Rectangle lines.")
         st.stop()
 
     try:
@@ -894,7 +1042,7 @@ def main():
         if normalize_column_name(col) in ["uniqueid", "unique_id", "uid", "qr", "qr_code"]:
             default_unique_index = idx
             break
-    unique_id_col = st.selectbox("Optional uniqueID column for QR codes", options=unique_candidates, index=default_unique_index, help="If selected and QR is enabled, non-empty values become QR codes in the bottom-right area of the rectangle.")
+    unique_id_col = st.selectbox("Optional uniqueID column for QR codes", options=unique_candidates, index=default_unique_index, help="Optional. When present, UniqueID is always encoded first because it is the safest identifier for database workflows. If blank or not selected, QR codes can still be generated from the label text.")
     unique_id_col = unique_id_col or None
 
     ignore_cols_for_mapping = [c for c in [setid_col, unique_id_col] if c]
@@ -927,7 +1075,7 @@ def main():
         map_warns = mapping_warnings(st.session_state.mapping_df)
         for warning in map_warns:
             st.warning(warning)
-        st.caption("Circle can use lines 1 to 3. Rectangle can use lines 1 to 6. Line spacing in the DOCX output is fixed at 0.75.")
+        st.caption("Circle can use 2 text lines. Rectangle can use lines 1 to 6. Line spacing in the DOCX output is fixed at 0.75.")
 
     with tab_setid:
         if setid_col:
@@ -937,9 +1085,9 @@ def main():
         else:
             st.caption("No setID column selected. You can add a column named setID in Excel if you want labels grouped by collection type or experiment subset.")
         if unique_id_col:
-            st.caption(f"QR source column: {unique_id_col}. Blank values will not get a QR code.")
+            st.caption(f"UniqueID column: {unique_id_col}. Non-empty IDs are always encoded first. Rows without an ID can still get a QR from their descriptive label text.")
         else:
-            st.caption("No uniqueID column selected. Add a column named uniqueID if you want automatic QR codes.")
+            st.caption("No UniqueID column selected. QR codes can still be generated from label text. Add a UniqueID column when you need safe database-level item identification.")
 
     st.subheader("3. Build preview")
     if st.button("Build printable layout", type="primary"):
@@ -1019,7 +1167,17 @@ def main():
         st.subheader("4. Generate files")
         if st.button("Generate filled DOCX and inventory table", type="primary"):
             try:
-                output_bytes = fill_from_layout(template_bytes, st.session_state.layout_df, allow_overwrite, add_qr_codes=add_qr_codes, qr_size_inches=float(qr_size_inches))
+                output_bytes = fill_from_layout(
+                    template_bytes,
+                    st.session_state.layout_df,
+                    allow_overwrite,
+                    add_qr_codes=add_qr_codes,
+                    rectangle_qr_size_inches=float(rectangle_qr_size_inches),
+                    add_circle_qr_codes=add_circle_qr_codes,
+                    circle_qr_small_inches=float(circle_qr_small_inches),
+                    circle_qr_main_inches=float(circle_qr_main_inches),
+                    max_qr_payload_chars=int(max_qr_payload_chars),
+                )
                 inventory_df = build_inventory_table(st.session_state.layout_df, include_box_layout=include_box_layout)
                 inventory_bytes = inventory_table_to_excel_bytes(inventory_df)
                 st.session_state.generated_docx = output_bytes
