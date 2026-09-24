@@ -18,11 +18,16 @@ If `CryoSTUCK_labels.docx` exists in the app folder, the app uses it by default.
 
 If the spreadsheet has a column named `uniqueID`, `unique_id`, `uid`, `qr`, or `qr_code`, the app detects it automatically.
 
-When QR codes are enabled, rows with a non-empty unique ID get a small QR code added to the bottom-right area of the rectangle label. Blank values are ignored.
+When QR codes are enabled, the app builds a capped payload from the available label information. `UniqueID`, when present, is always encoded first because it is the safest identifier for database workflows. If `UniqueID` is blank, the QR can still contain the descriptive sample information.
 
-QR code placement is intentionally small and optional. Always test print and scan before using it for a real experiment.
+The rectangle QR is enabled through the main **Create QR code** control. The additional circle/lid QR is **off by default** and can be enabled separately. The circle/lid supports up to three text lines when the lid QR is off. When the lid QR is enabled, `CircleLine3` is reserved for the QR and is not printed as text. The lid QR is placed differently depending on whether `CircleLine2MainInfo` is filled: if line 2 is blank, the QR can be larger; if line 2 has text, the QR is kept smaller.
 
-## Character length warnings
+The QR size fields are not hard-limited. The defaults are intended as practical starting points, but users can enter another positive size after testing their printer and scanner.
+
+## Font sizing and character length warnings
+
+Font size fields are not hard-limited. The default sizes are tuned for this label, but users can enter another positive point size if their layout requires it.
+
 
 The app includes approximate text-fit warnings by label part and font size. These warnings do not block printing.
 
@@ -59,4 +64,4 @@ The app includes a **Download blank Excel input template** button before data up
 - `SetID`
 - `UniqueID`
 
-The default mapping is name-aware. `CircleLine2MainInfo` and `RectangleLine1MainInfo` are mapped as the bold main-information lines. `SetID` and `UniqueID` are detected separately and are not printed as regular label text unless you manually map them.
+The default mapping is name-aware. The circle/lid can use `CircleLine1`, `CircleLine2MainInfo`, and `CircleLine3` as text lines. If lid QR is enabled, `CircleLine3` is reserved for the QR and is not printed as text. `CircleLine2MainInfo` and `RectangleLine1MainInfo` are mapped as the bold main-information lines. `SetID` and `UniqueID` are detected separately and are not printed as regular label text unless you manually map them.
