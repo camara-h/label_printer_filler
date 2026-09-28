@@ -14,6 +14,13 @@ A Streamlit app that takes an Excel or CSV table and fills a compatible LabTAG C
 
 If `CryoSTUCK_labels.docx` exists in the app folder, the app uses it by default. Otherwise, it falls back to `Letter-125-NO0424.docx`.
 
+
+## Per-SetID formatting
+
+If a `SetID` column is selected, the app creates one formatting tab for every unique SetID found in the uploaded table. Each tab starts from the same default column mapping, font sizes, colors, bold settings, and alignment, but can then be customized independently. Rows with a blank SetID use an **Unassigned** formatting tab. If no SetID column is selected, a single **All labels** tab is used.
+
+The main formatting controls remain table-based. Text color is controlled with a native Streamlit HEX color picker for each source column; black (`#000000`) remains the default.
+
 ## QR codes
 
 If the spreadsheet has a column named `uniqueID`, `unique_id`, `uid`, `qr`, or `qr_code`, the app detects it automatically.

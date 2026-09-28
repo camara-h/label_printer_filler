@@ -53,6 +53,8 @@ ALIGNMENTS = {
 DISPLAY_ALIGNMENTS = list(ALIGNMENTS.keys())
 PRINT_PARTS = ["Circle", "Rectangle", "Ignore"]
 SIDES = ["Left/new line", "Right/tab on same line"]
+ALL_LABELS_SET_KEY = "__ALL_LABELS__"
+UNASSIGNED_SET_KEY = "__UNASSIGNED__"
 
 
 def label_to_table_columns(label_column: int) -> Tuple[int, int]:
@@ -549,6 +551,40 @@ def read_input_table(uploaded_file) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def set_mapping_key(value: Any, setid_col: Optional[str]) -> str:
+    """Return a stable formatting-map key for a SetID value."""
+    if not setid_col:
+        return ALL_LABELS_SET_KEY
+    text = clean_cell_value(value).strip()
+    return text if text else UNASSIGNED_SET_KEY
+
+
+def detected_set_mapping_keys(df: pd.DataFrame, setid_col: Optional[str]) -> List[str]:
+    """Return SetID keys in first-appearance order, including blank rows as Unassigned."""
+    if not setid_col:
+        return [ALL_LABELS_SET_KEY]
+    keys: List[str] = []
+    for value in df[setid_col].tolist():
+        key = set_mapping_key(value, setid_col)
+        if key not in keys:
+            keys.append(key)
+    return keys or [UNASSIGNED_SET_KEY]
+
+
+def display_set_mapping_key(key: str) -> str:
+    if key == ALL_LABELS_SET_KEY:
+        return "All labels"
+    if key == UNASSIGNED_SET_KEY:
+        return "Unassigned"
+    return str(key)
+
+
+def mapping_columns_match(mapping_df: pd.DataFrame, expected_columns: List[str]) -> bool:
+    if mapping_df is None or mapping_df.empty or "source_column" not in mapping_df.columns:
+        return False
+    return list(mapping_df["source_column"].astype(str)) == list(map(str, expected_columns))
+
+
 def detect_position_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     normalized = {str(c).strip().lower().replace(" ", "_"): c for c in df.columns}
     sheet_col = normalized.get("sheet") or normalized.get("print_sheet")
@@ -703,15 +739,20 @@ def positions_for_count(count: int, occupied: set, skip_occupied: bool, start_sh
     return positions
 
 
-def build_labels_from_input(df: pd.DataFrame, mapping_df: pd.DataFrame, setid_col: Optional[str], unique_id_col: Optional[str], occupied: set, skip_occupied: bool, start_sheet: int, start_row: int, start_col: int) -> pd.DataFrame:
-    mapping_df = normalize_mapping(mapping_df)
+def build_labels_from_input(df: pd.DataFrame, mapping_by_set: Dict[str, pd.DataFrame], setid_col: Optional[str], unique_id_col: Optional[str], occupied: set, skip_occupied: bool, start_sheet: int, start_row: int, start_col: int) -> pd.DataFrame:
+    if not mapping_by_set:
+        raise ValueError("No formatting map is available.")
+    normalized_maps = {key: normalize_mapping(value) for key, value in mapping_by_set.items()}
+    fallback_mapping = next(iter(normalized_maps.values()))
     positions = positions_for_count(len(df), occupied, skip_occupied, start_sheet, start_row, start_col)
     rows = []
     for i, (_, source_row) in enumerate(df.iterrows()):
         sheet, row, col = positions[i]
+        set_id = clean_cell_value(source_row.get(setid_col, "")) if setid_col else ""
+        map_key = set_mapping_key(source_row.get(setid_col, "") if setid_col else "", setid_col)
+        mapping_df = normalized_maps.get(map_key, fallback_mapping)
         circle_lines = build_label_lines_for_row(source_row, mapping_df, "Circle")
         rect_lines = build_label_lines_for_row(source_row, mapping_df, "Rectangle")
-        set_id = clean_cell_value(source_row.get(setid_col, "")) if setid_col else ""
         unique_id = clean_cell_value(source_row.get(unique_id_col, "")) if unique_id_col else ""
         rows.append({
             "Use": True,
@@ -727,7 +768,6 @@ def build_labels_from_input(df: pd.DataFrame, mapping_df: pd.DataFrame, setid_co
             "Rectangle lines JSON": repr(rect_lines),
         })
     return pd.DataFrame(rows)
-
 
 def parse_lines_repr(value: Any) -> List[Dict[str, Any]]:
     if isinstance(value, list):
@@ -944,6 +984,10 @@ def inject_custom_css():
 def init_state():
     if "mapping_df" not in st.session_state:
         st.session_state.mapping_df = pd.DataFrame()
+    if "mapping_by_set" not in st.session_state:
+        st.session_state.mapping_by_set = {}
+    if "mapping_signature" not in st.session_state:
+        st.session_state.mapping_signature = None
     if "layout_df" not in st.session_state:
         st.session_state.layout_df = pd.DataFrame()
     if "generated_docx" not in st.session_state:
@@ -1060,57 +1104,106 @@ def main():
     unique_id_col = unique_id_col or None
 
     ignore_cols_for_mapping = [c for c in [setid_col, unique_id_col] if c]
-    if st.session_state.mapping_df.empty or set(st.session_state.mapping_df.get("source_column", [])) != set([c for c in input_df.columns if c not in ignore_cols_for_mapping]):
-        st.session_state.mapping_df = default_mapping_for_columns([c for c in input_df.columns if c != unique_id_col], setid_col)
+    base_mapping = default_mapping_for_columns([c for c in input_df.columns if c != unique_id_col], setid_col)
+    expected_mapping_columns = base_mapping["source_column"].astype(str).tolist()
+    set_mapping_keys = detected_set_mapping_keys(input_df, setid_col)
+    mapping_signature = (tuple(expected_mapping_columns), str(setid_col or ""), tuple(set_mapping_keys))
+    mapping_widget_token = str(abs(hash(mapping_signature)))
 
-    tab_global, tab_setid = st.tabs(["Column mapping and formatting", "Set ID notes"])
-    with tab_global:
-        st.caption("For tabbed lines, map one column to Left/new line and another column to Right/tab on same line using the same Circle/Rectangle line number.")
-        edited_mapping = st.data_editor(
-            st.session_state.mapping_df,
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            column_config={
-                "source_column": st.column_config.TextColumn("Excel/CSV column", disabled=True),
-                "print_part": st.column_config.SelectboxColumn("Label part", options=PRINT_PARTS),
-                "line": st.column_config.NumberColumn("Line", min_value=1, max_value=MAX_RECTANGLE_LINES, step=1),
-                "side": st.column_config.SelectboxColumn("Line or tab", options=SIDES),
-                "font_size": st.column_config.NumberColumn("Font", step=0.5, help="Defaults are tuned for this label, but font size is not restricted. Use a positive point size."),
-                "bold": st.column_config.CheckboxColumn("Bold"),
-                "align": st.column_config.SelectboxColumn("Align", options=DISPLAY_ALIGNMENTS),
-                "color": st.column_config.TextColumn("HEX color"),
-                "tab_pos": st.column_config.NumberColumn("Tab pos", min_value=300, max_value=2200, step=50),
-            },
-            disabled=["source_column"],
-            key="spreadsheet_mapping_editor",
-        )
-        st.session_state.mapping_df = normalize_mapping(edited_mapping)
-        if (st.session_state.mapping_df["font_size"] <= 0).any():
-            st.error("Font sizes must be greater than 0 pt.")
-        map_warns = mapping_warnings(st.session_state.mapping_df)
-        for warning in map_warns:
-            st.warning(warning)
-        st.caption("Circle can use 3 text lines when lid QR is off. When lid QR is on, circle line 3 is reserved for the QR and is not printed as text. Rectangle can use lines 1 to 6. Line spacing in the DOCX output is fixed at 0.75.")
+    if st.session_state.mapping_signature != mapping_signature:
+        previous_maps = st.session_state.mapping_by_set if isinstance(st.session_state.mapping_by_set, dict) else {}
+        refreshed_maps: Dict[str, pd.DataFrame] = {}
+        for key in set_mapping_keys:
+            previous = previous_maps.get(key)
+            if isinstance(previous, pd.DataFrame) and mapping_columns_match(previous, expected_mapping_columns):
+                refreshed_maps[key] = normalize_mapping(previous)
+            else:
+                refreshed_maps[key] = base_mapping.copy(deep=True)
+        st.session_state.mapping_by_set = refreshed_maps
+        st.session_state.mapping_signature = mapping_signature
+        st.session_state.layout_df = pd.DataFrame()
+        st.session_state.generated_docx = None
+        st.session_state.generated_inventory_xlsx = None
 
-    with tab_setid:
-        if setid_col:
-            detected = input_df[setid_col].dropna().astype(str).unique().tolist()
-            st.write("Detected set IDs:", ", ".join(detected[:30]) if detected else "none")
-            st.caption("This version uses one formatting map for all rows. The setID column travels with the preview and inventory export. A future patch can add separate formatting overrides per setID if you still need that after testing this simpler workflow.")
-        else:
-            st.caption("No setID column selected. You can add a column named setID in Excel if you want labels grouped by collection type or experiment subset.")
-        if unique_id_col:
-            st.caption(f"UniqueID column: {unique_id_col}. Non-empty IDs are always encoded first. Rows without an ID can still get a QR from their descriptive label text.")
-        else:
-            st.caption("No UniqueID column selected. QR codes can still be generated from label text. Add a UniqueID column when you need safe database-level item identification.")
+    if setid_col:
+        st.caption("Each detected SetID has its own formatting tab. All SetIDs start with the same default mapping, font sizes, colors, and alignment, then can be edited independently.")
+    else:
+        st.caption("No SetID column is selected, so one formatting tab applies to all labels.")
+
+    tab_labels = [display_set_mapping_key(key) for key in set_mapping_keys]
+    if len(tab_labels) > 15:
+        st.warning(f"Detected {len(tab_labels)} SetIDs. All formatting tabs are available, but the tab bar may be wide.")
+    formatting_tabs = st.tabs(tab_labels)
+
+    for set_idx, (set_key, format_tab) in enumerate(zip(set_mapping_keys, formatting_tabs)):
+        with format_tab:
+            set_label = display_set_mapping_key(set_key)
+            if setid_col:
+                if set_key == UNASSIGNED_SET_KEY:
+                    row_count = int(input_df[setid_col].apply(lambda v: set_mapping_key(v, setid_col) == UNASSIGNED_SET_KEY).sum())
+                else:
+                    row_count = int(input_df[setid_col].apply(lambda v: set_mapping_key(v, setid_col) == set_key).sum())
+                st.caption(f"Formatting for SetID: {set_label} ({row_count} label row{'s' if row_count != 1 else ''}).")
+            st.caption("For tabbed lines, map one column to Left/new line and another column to Right/tab on same line using the same Circle/Rectangle line number.")
+
+            current_mapping = normalize_mapping(st.session_state.mapping_by_set[set_key])
+            editor_key = f"spreadsheet_mapping_editor_{mapping_widget_token}_{set_idx}"
+            edited_mapping = st.data_editor(
+                current_mapping,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                column_config={
+                    "source_column": st.column_config.TextColumn("Excel/CSV column", disabled=True),
+                    "print_part": st.column_config.SelectboxColumn("Label part", options=PRINT_PARTS),
+                    "line": st.column_config.NumberColumn("Line", min_value=1, max_value=MAX_RECTANGLE_LINES, step=1),
+                    "side": st.column_config.SelectboxColumn("Line or tab", options=SIDES),
+                    "font_size": st.column_config.NumberColumn("Font", step=0.5, help="Defaults are tuned for this label, but font size is not restricted. Use a positive point size."),
+                    "bold": st.column_config.CheckboxColumn("Bold"),
+                    "align": st.column_config.SelectboxColumn("Align", options=DISPLAY_ALIGNMENTS),
+                    "color": st.column_config.TextColumn("Color", disabled=True, help="Use the color pickers below. The HEX value is stored here."),
+                    "tab_pos": st.column_config.NumberColumn("Tab pos", min_value=300, max_value=2200, step=50),
+                },
+                disabled=["source_column", "color"],
+                key=editor_key,
+            )
+            edited_mapping = normalize_mapping(edited_mapping)
+
+            st.markdown("**Text colors**")
+            st.caption("Use the HEX color wheel for any column. Black remains the default.")
+            color_values = []
+            picker_cols = st.columns(min(4, max(1, len(edited_mapping))))
+            for row_idx, (_, map_row) in enumerate(edited_mapping.iterrows()):
+                picker_col = picker_cols[row_idx % len(picker_cols)]
+                with picker_col:
+                    picked_color = st.color_picker(
+                        str(map_row["source_column"]),
+                        value=normalize_hex_color(map_row.get("color", "#000000")),
+                        key=f"mapping_color_{mapping_widget_token}_{set_idx}_{row_idx}",
+                        help=f"Text color for {map_row['source_column']}."
+                    )
+                color_values.append(normalize_hex_color(picked_color))
+            if color_values:
+                edited_mapping.loc[:, "color"] = color_values
+
+            st.session_state.mapping_by_set[set_key] = normalize_mapping(edited_mapping)
+            if (st.session_state.mapping_by_set[set_key]["font_size"] <= 0).any():
+                st.error("Font sizes must be greater than 0 pt.")
+            for warning in mapping_warnings(st.session_state.mapping_by_set[set_key]):
+                st.warning(warning)
+            st.caption("Circle can use 3 text lines when lid QR is off. When lid QR is on, circle line 3 is reserved for the QR and is not printed as text. Rectangle can use lines 1 to 6. Line spacing in the DOCX output is fixed at 0.75.")
+
+    if unique_id_col:
+        st.caption(f"UniqueID column: {unique_id_col}. Non-empty IDs are always encoded first. Rows without an ID can still get a QR from their descriptive label text.")
+    else:
+        st.caption("No UniqueID column selected. QR codes can still be generated from label text. Add a UniqueID column when you need safe database-level item identification.")
 
     st.subheader("3. Build preview")
     if st.button("Build printable layout", type="primary"):
         try:
             st.session_state.layout_df = build_labels_from_input(
                 input_df,
-                st.session_state.mapping_df,
+                st.session_state.mapping_by_set,
                 setid_col,
                 unique_id_col,
                 existing_occupied,
@@ -1183,8 +1276,13 @@ def main():
         st.subheader("4. Generate files")
         if st.button("Generate filled DOCX and inventory table", type="primary"):
             try:
-                if (st.session_state.mapping_df["font_size"] <= 0).any():
-                    raise ValueError("Font sizes must be greater than 0 pt.")
+                invalid_font_sets = [
+                    display_set_mapping_key(key)
+                    for key, mapping in st.session_state.mapping_by_set.items()
+                    if (normalize_mapping(mapping)["font_size"] <= 0).any()
+                ]
+                if invalid_font_sets:
+                    raise ValueError("Font sizes must be greater than 0 pt. Check: " + ", ".join(invalid_font_sets))
                 if add_qr_codes and float(rectangle_qr_size_inches) <= 0:
                     raise ValueError("Rectangle QR size must be greater than 0 inches.")
                 if add_qr_codes and add_circle_qr_codes and (float(circle_qr_small_inches) <= 0 or float(circle_qr_main_inches) <= 0):
