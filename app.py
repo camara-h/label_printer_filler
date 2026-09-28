@@ -6,9 +6,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 try:
-    import qrcode
+    from pystrich.datamatrix import DataMatrixData, DataMatrixEncoder
 except ModuleNotFoundError:
-    qrcode = None
+    DataMatrixData = None
+    DataMatrixEncoder = None
 try:
     import streamlit as st
 except ModuleNotFoundError:
@@ -34,11 +35,11 @@ LABEL_LINE_SPACING_MULTIPLE = 0.75
 LABEL_LINE_SPACING_TWIPS = int(240 * LABEL_LINE_SPACING_MULTIPLE)
 MAX_CIRCLE_LINES = 3
 MAX_RECTANGLE_LINES = 6
-DEFAULT_QR_SIZE_INCHES = 0.16
-DEFAULT_RECTANGLE_QR_SIZE_INCHES = 0.16
+DEFAULT_QR_SIZE_INCHES = 0.15
+DEFAULT_RECTANGLE_QR_SIZE_INCHES = 0.15
 DEFAULT_CIRCLE_QR_SMALL_INCHES = 0.15
-DEFAULT_CIRCLE_QR_MAIN_INCHES = 0.20
-DEFAULT_MAX_QR_PAYLOAD_CHARS = 60
+DEFAULT_CIRCLE_QR_MAIN_INCHES = 0.15
+DEFAULT_MAX_QR_PAYLOAD_CHARS = 20
 
 DEFAULT_CHAR_LIMITS = {
     "Circle": {"7": 8, "6": 10, "5": 13, "4": 16},
@@ -115,14 +116,14 @@ def printable_length(text: str) -> int:
 
 
 def line_text_for_qr(line: Dict[str, Any]) -> str:
-    """Return one clean text value from a formatted label line for QR payloads."""
+    """Return one clean text value from a formatted label line for Data Matrix payloads."""
     left = str(line.get("left_text", "")).strip()
     right = str(line.get("right_text", "")).strip()
     return "	".join([part for part in [left, right] if part]).strip()
 
 
 def truncate_qr_payload(parts: List[str], max_chars: int, separator: str = "	") -> str:
-    """Join non-empty parts and cap total QR payload length.
+    """Join non-empty parts and cap total Data Matrix payload length.
 
     Keeps earlier fields first. UniqueID should be passed as the first part, so it is prioritized.
     """
@@ -150,22 +151,20 @@ def truncate_qr_payload(parts: List[str], max_chars: int, separator: str = "	") 
 
 
 def build_qr_payload_from_layout_row(layout_row, max_chars: int) -> str:
-    """Build a capped QR payload from available label information.
+    """Build a compact Data Matrix payload from lid information only.
 
     Priority order:
-    1) Unique ID, when present
+    1) UniqueID, when present
     2) Circle line 2 main info
     3) Circle line 1
-    4) Circle line 3, when present
-    5) Rectangle line 1 main info
-    6) Remaining rectangle lines, in order
+    4) Circle line 3
 
-    UniqueID is the safest database identifier and is always placed first when available,
-    but it is not required. If no UniqueID exists, descriptive label text is encoded instead.
+    Rectangle text is intentionally excluded so the symbol stays compact and
+    reliable at very small print sizes. UniqueID remains the safest database
+    identifier and is always placed first when available.
     """
     unique_id = str(layout_row.get("Unique ID", "")).strip()
     circle_lines = parse_lines_repr(layout_row.get("Circle lines JSON", "[]"))
-    rect_lines = parse_lines_repr(layout_row.get("Rectangle lines JSON", "[]"))
 
     def find_line(lines, line_num):
         for line in lines:
@@ -181,31 +180,25 @@ def build_qr_payload_from_layout_row(layout_row, max_chars: int) -> str:
         find_line(circle_lines, 2),
         find_line(circle_lines, 1),
         find_line(circle_lines, 3),
-        find_line(rect_lines, 1),
     ]
-    for line in sorted(rect_lines, key=lambda x: int(x.get("line_num", 999))):
-        try:
-            if int(line.get("line_num", 0)) <= 1:
-                continue
-        except Exception:
-            pass
-        parts.append(line_text_for_qr(line))
-    return truncate_qr_payload(parts, max_chars=max_chars, separator="	")
+    # Use a visible one-character separator instead of a literal tab so HID
+    # barcode scanners do not accidentally navigate between UI fields.
+    return truncate_qr_payload(parts, max_chars=max_chars, separator="|")
 
 def make_qr_image_bytes(value: str) -> Optional[io.BytesIO]:
-    if not value or qrcode is None:
+    """Generate a compact ECC200 Data Matrix PNG.
+
+    The function name is retained internally for compatibility with the
+    existing document-writing code, but the generated symbol is Data Matrix,
+    not QR. A one-module quiet zone is the minimum required by the standard
+    and keeps the symbol compact for cryogenic label printing.
+    """
+    if not value or DataMatrixEncoder is None or DataMatrixData is None:
         return None
-    qr = qrcode.QRCode(
-        version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=4,
-        border=1,
-    )
-    qr.add_data(str(value))
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    bio = io.BytesIO()
-    img.save(bio, format="PNG")
+    payload = DataMatrixData(str(value), auto_encoding=True)
+    encoder = DataMatrixEncoder(payload, quiet_zone=1, symbol_shape="square")
+    png_bytes = encoder.get_imagedata(cellsize=8)
+    bio = io.BytesIO(png_bytes)
     bio.seek(0)
     return bio
 
@@ -439,8 +432,8 @@ def write_circle_cell_from_lines(
     text_lines = [line for line in lines if _line_has_text(line)][:MAX_CIRCLE_LINES]
 
     if add_circle_qr and qr_text:
-        # The third circle text line is intentionally reserved for the QR when lid QR is enabled.
-        # Keep lines 1-2 only; CircleLine3 remains available when lid QR is disabled.
+        # The third circle text line is intentionally reserved for the Data Matrix when lid Data Matrix is enabled.
+        # Keep lines 1-2 only; CircleLine3 remains available when lid Data Matrix is disabled.
         qr_text_lines = [
             line for line in text_lines
             if int(line.get("line_num", 0) or 0) <= 2
@@ -450,11 +443,11 @@ def write_circle_cell_from_lines(
             for idx, line in enumerate(qr_text_lines)
         )
         if has_second_line:
-            # With a second text line present, keep the QR small and place it first.
+            # With a second text line present, keep the Data Matrix compact and place it first.
             add_qr_paragraph(cell, qr_text, small_qr_size_inches, alignment=WD_ALIGN_PARAGRAPH.CENTER)
             write_text_lines(cell, qr_text_lines, default_alignment="Center")
         else:
-            # If line 2 is blank, use that space for the larger QR.
+            # If line 2 is blank, use that space for the Data Matrix.
             write_text_lines(cell, qr_text_lines, default_alignment="Center")
             add_qr_paragraph(cell, qr_text, main_qr_size_inches, alignment=WD_ALIGN_PARAGRAPH.CENTER)
         return
@@ -490,7 +483,7 @@ def build_input_template_excel_bytes() -> bytes:
             "Expiration Date",
             "ELN: DD/MM/YYYY",
             "ExampleSet",
-            "IT000001",
+            "IT-HC000001",
         ],
         [
             "ELN:",
@@ -502,7 +495,7 @@ def build_input_template_excel_bytes() -> bytes:
             "Expiration Date",
             "ELN: DD/MM/YYYY",
             "ExampleSet",
-            "IT000002",
+            "IT-HC000002",
         ],
     ]
     df = pd.DataFrame(example_rows, columns=columns)
@@ -524,10 +517,10 @@ def build_input_template_excel_bytes() -> bytes:
         note_rows = [
             ["How to use this template"],
             ["Fill one row per label. Keep column names unchanged for easiest mapping."],
-            ["CircleLine1, CircleLine2MainInfo, and CircleLine3 can become the three circle/lid text lines. If lid QR is enabled, CircleLine3 is reserved for the QR and is not printed as text."],
+            ["CircleLine1, CircleLine2MainInfo, and CircleLine3 can become the three circle/lid text lines. If lid Data Matrix is enabled, CircleLine3 is reserved for the Data Matrix and is not printed as text."],
             ["RectangleLine1MainInfo and RectangleLine2-5 become rectangle lines."],
             ["SetID is optional and can group labels by collection type, experiment, or batch."],
-            ["UniqueID is optional. When provided, it is always encoded first because it is the safest database identifier. If it is absent, QR output can still encode descriptive label information up to the configured character limit."],
+            ["UniqueID is optional. When provided, it is always encoded first because it is the safest database identifier. If it is absent, Data Matrix output can still encode the available circle/lid information up to the configured character limit."],
             ["Non-main info can be left blank. Examples marked (Optional) are placeholders only."],
         ]
         for r, values in enumerate(note_rows, start=1):
@@ -1040,18 +1033,44 @@ def main():
         allow_overwrite = st.checkbox("Allow overwrite if layout targets used labels", value=False)
         include_box_layout = st.checkbox("Add 10 x 10 box columns to inventory export", value=True)
 
-        st.header("QR codes")
-        add_qr_codes = st.checkbox("Create QR code", value=True)
-        add_circle_qr_codes = st.checkbox("Also add QR code to circle/lid", value=False, help="Optional. If enabled, the same capped QR payload is also added to the lid. This is off by default because most users only need the rectangle QR. If circle line 2 is blank, the lid QR can be larger.")
-        max_qr_payload_chars = st.number_input("Maximum characters encoded in each QR", min_value=8, max_value=200, value=DEFAULT_MAX_QR_PAYLOAD_CHARS, step=5, help="The QR uses available label information up to this limit. UniqueID is always placed first when present, followed by CircleLine2MainInfo, CircleLine1, CircleLine3, RectangleLine1MainInfo, and remaining rectangle lines. Extra text is truncated.")
-        st.caption("QR payload order: UniqueID (when present) → CircleLine2MainInfo → CircleLine1 → CircleLine3 → RectangleLine1MainInfo → remaining rectangle lines. Blank fields are skipped. If UniqueID is absent, the QR still uses the available sample information. Long payloads are truncated.")
-        rectangle_qr_size_inches = st.number_input("QR size in rectangle, inches", value=DEFAULT_RECTANGLE_QR_SIZE_INCHES, step=0.01, format="%.2f", help="Default 0.16 in. You can enter another size if your printer/scanner setup works better. Values must be greater than 0.")
-        circle_qr_small_inches = st.number_input("Circle QR size when two lid text lines are present", value=DEFAULT_CIRCLE_QR_SMALL_INCHES, step=0.01, format="%.2f", help="Default 0.15 in. Used when the circle already has text in line 2. You can enter another positive size if needed.")
-        circle_qr_main_inches = st.number_input("Circle QR size when circle line 2 is blank", value=DEFAULT_CIRCLE_QR_MAIN_INCHES, step=0.01, format="%.2f", help="Default 0.20 in. Used when there is no circle line 2 text, so the QR can use more lid space. You can enter another positive size if needed.")
-        if any(float(v) <= 0 for v in [rectangle_qr_size_inches, circle_qr_small_inches, circle_qr_main_inches]):
-            st.error("QR code sizes must be greater than 0 inches.")
-        if add_qr_codes and qrcode is None:
-            st.error("QR code support requires the qrcode package. Add qrcode[pil] to requirements.txt.")
+        st.header("Data Matrix codes")
+        add_qr_codes = st.checkbox(
+            "Create Data Matrix",
+            value=True,
+            help="Creates a compact ECC200 Data Matrix. If UniqueID is present it is always encoded first; otherwise the available lid text is used.",
+        )
+        add_circle_qr_codes = st.checkbox(
+            "Also add Data Matrix to circle/lid",
+            value=False,
+            help="Optional and off by default. When enabled, CircleLine3 is reserved for the Data Matrix and is not printed as text.",
+        )
+        max_qr_payload_chars = st.number_input(
+            "Maximum characters encoded",
+            min_value=1,
+            value=DEFAULT_MAX_QR_PAYLOAD_CHARS,
+            step=1,
+            help="Default 20 characters. Payload order is UniqueID → CircleLine2MainInfo → CircleLine1 → CircleLine3. Blank values are skipped and later text is truncated. Rectangle text is not encoded.",
+        )
+        st.caption("Data Matrix payload: UniqueID (when present) → CircleLine2MainInfo → CircleLine1 → CircleLine3. Only lid information is encoded, capped at 20 characters by default. Fields are separated with | so scanner output remains one clean string.")
+        rectangle_qr_size_inches = st.number_input(
+            "Data Matrix size in rectangle, inches",
+            value=DEFAULT_RECTANGLE_QR_SIZE_INCHES,
+            step=0.01,
+            format="%.2f",
+            help="Default 0.15 in. The rectangle uses the same compact lid-derived payload for now.",
+        )
+        circle_qr_small_inches = st.number_input(
+            "Data Matrix size in circle/lid, inches",
+            value=DEFAULT_CIRCLE_QR_SMALL_INCHES,
+            step=0.01,
+            format="%.2f",
+            help="Default 0.15 in. Used when the optional lid Data Matrix is enabled.",
+        )
+        circle_qr_main_inches = circle_qr_small_inches
+        if any(float(v) <= 0 for v in [rectangle_qr_size_inches, circle_qr_small_inches]):
+            st.error("Data Matrix sizes must be greater than 0 inches.")
+        if add_qr_codes and DataMatrixEncoder is None:
+            st.error("Data Matrix support requires pyStrich with PNG support. Add pyStrich[png]==0.20 to requirements.txt.")
 
         st.header("Text length checks")
         uploaded_limits = st.file_uploader("Optional JSON character limit config", type=["json"], help="Optional. Use this to tune max character warnings by label part and font size.")
@@ -1100,7 +1119,7 @@ def main():
         if normalize_column_name(col) in ["uniqueid", "unique_id", "uid", "qr", "qr_code"]:
             default_unique_index = idx
             break
-    unique_id_col = st.selectbox("Optional uniqueID column for QR codes", options=unique_candidates, index=default_unique_index, help="Optional. When present, UniqueID is always encoded first because it is the safest identifier for database workflows. If blank or not selected, QR codes can still be generated from the label text.")
+    unique_id_col = st.selectbox("Optional uniqueID column for Data Matrix", options=unique_candidates, index=default_unique_index, help="Optional. When present, UniqueID is always encoded first because it is the safest identifier for database workflows. If blank or not selected, Data Matrix codes can still be generated from the lid text.")
     unique_id_col = unique_id_col or None
 
     ignore_cols_for_mapping = [c for c in [setid_col, unique_id_col] if c]
@@ -1191,12 +1210,12 @@ def main():
                 st.error("Font sizes must be greater than 0 pt.")
             for warning in mapping_warnings(st.session_state.mapping_by_set[set_key]):
                 st.warning(warning)
-            st.caption("Circle can use 3 text lines when lid QR is off. When lid QR is on, circle line 3 is reserved for the QR and is not printed as text. Rectangle can use lines 1 to 6. Line spacing in the DOCX output is fixed at 0.75.")
+            st.caption("Circle can use 3 text lines when lid Data Matrix is off. When lid Data Matrix is on, circle line 3 is reserved for the Data Matrix and is not printed as text. Rectangle can use lines 1 to 6. Line spacing in the DOCX output is fixed at 0.75.")
 
     if unique_id_col:
-        st.caption(f"UniqueID column: {unique_id_col}. Non-empty IDs are always encoded first. Rows without an ID can still get a QR from their descriptive label text.")
+        st.caption(f"UniqueID column: {unique_id_col}. Non-empty IDs are always encoded first. Rows without an ID can still get a Data Matrix from CircleLine2MainInfo, CircleLine1, and CircleLine3.")
     else:
-        st.caption("No UniqueID column selected. QR codes can still be generated from label text. Add a UniqueID column when you need safe database-level item identification.")
+        st.caption("No UniqueID column selected. Data Matrix codes can still be generated from the lid text. Add a UniqueID column when you need safe database-level item identification.")
 
     st.subheader("3. Build preview")
     if st.button("Build printable layout", type="primary"):
@@ -1284,9 +1303,9 @@ def main():
                 if invalid_font_sets:
                     raise ValueError("Font sizes must be greater than 0 pt. Check: " + ", ".join(invalid_font_sets))
                 if add_qr_codes and float(rectangle_qr_size_inches) <= 0:
-                    raise ValueError("Rectangle QR size must be greater than 0 inches.")
+                    raise ValueError("Rectangle Data Matrix size must be greater than 0 inches.")
                 if add_qr_codes and add_circle_qr_codes and (float(circle_qr_small_inches) <= 0 or float(circle_qr_main_inches) <= 0):
-                    raise ValueError("Circle/lid QR sizes must be greater than 0 inches.")
+                    raise ValueError("Circle/lid Data Matrix size must be greater than 0 inches.")
                 output_bytes = fill_from_layout(
                     template_bytes,
                     st.session_state.layout_df,

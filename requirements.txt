@@ -2,4 +2,4 @@ streamlit
 python-docx
 pandas
 openpyxl
-qrcode[pil]
+pyStrich[png]==0.20

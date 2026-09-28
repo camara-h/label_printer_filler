@@ -21,15 +21,15 @@ If a `SetID` column is selected, the app creates one formatting tab for every un
 
 The main formatting controls remain table-based. Text color is controlled with a native Streamlit HEX color picker for each source column; black (`#000000`) remains the default.
 
-## QR codes
+## Data Matrix codes
 
-If the spreadsheet has a column named `uniqueID`, `unique_id`, `uid`, `qr`, or `qr_code`, the app detects it automatically.
+The app can generate compact ECC200 Data Matrix symbols. This is optimized for short cryogenic-label identifiers and uses a one-module quiet zone.
 
-When QR codes are enabled, the app builds a capped payload from the available label information. `UniqueID`, when present, is always encoded first because it is the safest identifier for database workflows. If `UniqueID` is blank, the QR can still contain the descriptive sample information.
+`UniqueID` is optional, but when present it is always encoded first because it is the safest identifier for database workflows. The default payload hierarchy is `UniqueID` → `CircleLine2MainInfo` → `CircleLine1` → `CircleLine3`. Rectangle text is intentionally excluded so the symbol stays compact. The payload is capped at 20 characters by default, and later fields are truncated as needed.
 
-The rectangle QR is enabled through the main **Create QR code** control. The additional circle/lid QR is **off by default** and can be enabled separately. The circle/lid supports up to three text lines when the lid QR is off. When the lid QR is enabled, `CircleLine3` is reserved for the QR and is not printed as text. The lid QR is placed differently depending on whether `CircleLine2MainInfo` is filled: if line 2 is blank, the QR can be larger; if line 2 has text, the QR is kept smaller.
+The rectangle Data Matrix is controlled by **Create Data Matrix**. The additional circle/lid Data Matrix is **off by default** and can be enabled separately. When the lid Data Matrix is enabled, `CircleLine3` is reserved for the symbol and is not printed as text. Both symbol sizes default to 0.15 inches.
 
-The QR size fields are not hard-limited. The defaults are intended as practical starting points, but users can enter another positive size after testing their printer and scanner.
+Fields inside the encoded payload are separated with `|` rather than a literal tab so a USB HID scanner returns one clean string instead of potentially moving focus between fields.
 
 ## Font sizing and character length warnings
 
@@ -71,4 +71,4 @@ The app includes a **Download blank Excel input template** button before data up
 - `SetID`
 - `UniqueID`
 
-The default mapping is name-aware. The circle/lid can use `CircleLine1`, `CircleLine2MainInfo`, and `CircleLine3` as text lines. If lid QR is enabled, `CircleLine3` is reserved for the QR and is not printed as text. `CircleLine2MainInfo` and `RectangleLine1MainInfo` are mapped as the bold main-information lines. `SetID` and `UniqueID` are detected separately and are not printed as regular label text unless you manually map them.
+The default mapping is name-aware. The circle/lid can use `CircleLine1`, `CircleLine2MainInfo`, and `CircleLine3` as text lines. If lid Data Matrix is enabled, `CircleLine3` is reserved for the Data Matrix and is not printed as text. `CircleLine2MainInfo` and `RectangleLine1MainInfo` are mapped as the bold main-information lines. `SetID` and `UniqueID` are detected separately and are not printed as regular label text unless you manually map them.
