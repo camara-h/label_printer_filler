@@ -1,6 +1,53 @@
-# LabTAG LCS-125WH Label Filler
+# Spreadsheet to LabTAG Label Filler
 
-Streamlit app for filling the LabTAG LCS-125WH Word template while preserving the original `.docx` table geometry.
+A Streamlit app that takes an Excel or CSV table and fills a compatible LabTAG CryoSTUCK Word template.
+
+## Main workflow
+
+1. Upload or use the included Word template.
+2. Upload an Excel or CSV file with one row per label.
+3. Confirm which spreadsheet columns map to the circle and rectangle parts of the label.
+4. Build the printable layout.
+5. Download the filled `.docx` template and the inventory-style `.xlsx` export.
+
+## Template preference
+
+If `CryoSTUCK_labels.docx` exists in the app folder, the app uses it by default. Otherwise, it falls back to `Letter-125-NO0424.docx`.
+
+
+## Per-SetID formatting
+
+If a `SetID` column is selected, the app creates one formatting tab for every unique SetID found in the uploaded table. Each tab starts from the same default column mapping, font sizes, colors, bold settings, and alignment, but can then be customized independently. Rows with a blank SetID use an **Unassigned** formatting tab. If no SetID column is selected, a single **All labels** tab is used.
+
+The main formatting controls remain table-based. Text color is controlled with a native Streamlit HEX color picker for each source column; black (`#000000`) remains the default.
+
+## Data Matrix codes
+
+The app can generate compact ECC200 Data Matrix symbols. This is optimized for short cryogenic-label identifiers and uses a one-module quiet zone.
+
+`UniqueID` is optional, but when present it is always encoded first because it is the safest identifier for database workflows. The default payload hierarchy is `UniqueID` → `CircleLine2MainInfo` → `CircleLine1` → `CircleLine3`. Rectangle text is intentionally excluded so the symbol stays compact. The payload is capped at 20 characters by default, and later fields are truncated as needed.
+
+The rectangle Data Matrix is controlled by **Create Data Matrix**. The additional circle/lid Data Matrix is **off by default** and can be enabled separately. When the lid Data Matrix is enabled, `CircleLine3` is reserved for the symbol and is not printed as text. Both symbol sizes default to 0.15 inches.
+
+Fields inside the encoded payload are separated with `|` rather than a literal tab so a USB HID scanner returns one clean string instead of potentially moving focus between fields.
+
+## Font sizing and character length warnings
+
+Font size fields are not hard-limited. The default sizes are tuned for this label, but users can enter another positive point size if their layout requires it.
+
+
+The app includes approximate text-fit warnings by label part and font size. These warnings do not block printing.
+
+You can upload a custom JSON config using this structure:
+
+```json
+{
+  "Circle": {"7": 8, "6": 10, "5": 13, "4": 16},
+  "Rectangle": {"7": 18, "6": 24, "5": 30, "4": 38}
+}
+```
+
+A starter file is included as `character_limits_example.json`.
 
 ## Install
 
@@ -9,43 +56,19 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Main workflow
+## Downloadable input template
 
-1. Use the included LCS-125WH template or upload a `.docx` template.
-2. Add one or more Label ID Sets, for example Liver and Brain.
-3. For each set, choose start sheet, start row, start label column, and number of labels.
-4. Add circle and rectangle lines with font size, bold, alignment, serialization, and text color.
-5. Build the editable layout.
-6. Review the editable layout and sheet map.
-7. Manually adjust sheet, row, or label column if needed.
-8. Generate and download the final `.docx`.
+The app includes a **Download blank Excel input template** button before data upload. The starter columns are:
 
-## Notes
+- `CircleLine1`
+- `CircleLine2MainInfo`
+- `CircleLine3`
+- `RectangleLine1MainInfo`
+- `RectangleLine2`
+- `RectangleLine3`
+- `RectangleLine4`
+- `RectangleLine5`
+- `SetID`
+- `UniqueID`
 
-- Text color uses Streamlit's built-in `st.color_picker`, with black as the default.
-- The app fills labels top to bottom, then left to right.
-- Existing text in the uploaded template is detected and can be skipped automatically.
-- If more labels are needed than fit on the current page, the app adds additional blank template pages.
-- The editable layout tab is for placement edits.
-- The advanced text editing tab allows final line-level text edits using JSON lists while preserving the original formatting rules for each line.
-- Always test print on plain paper first using actual size or 100 percent scaling.
-
-
-## v4 printing safeguards
-
-This version adds practical limits based on the physical label size:
-
-- Circle labels are limited to 3 lines. This is a hard limit because additional lines usually do not print reliably.
-- Rectangle labels are limited to 6 lines, with an in-app warning after 5 lines.
-- Font sizes are limited to 4 to 7 pt. The app warns when 4 pt is used because it may be hard to read after printing.
-- Text color is still controlled per line using the HEX color picker.
-
-## Update notes
-
-This version improves the line editor and DOCX generation behavior:
-
-- Label lines can be moved up or down.
-- Individual label lines can be deleted with the trash button.
-- Circle and rectangle line limits are preserved.
-- Multi-page DOCX output inserts duplicated template pages before the section properties, which avoids Word repair/corruption warnings.
-- Label text uses 0.8 line spacing in the generated DOCX.
+The default mapping is name-aware. The circle/lid can use `CircleLine1`, `CircleLine2MainInfo`, and `CircleLine3` as text lines. If lid Data Matrix is enabled, `CircleLine3` is reserved for the Data Matrix and is not printed as text. `CircleLine2MainInfo` and `RectangleLine1MainInfo` are mapped as the bold main-information lines. `SetID` and `UniqueID` are detected separately and are not printed as regular label text unless you manually map them.
